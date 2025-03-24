@@ -46,14 +46,12 @@ class LarkNotifier:
         # 将timestamp转为字符串
         timestamp_str = str(timestamp)
         
-        # 构造签名字符串: timestamp + "\n" + secret
-        string_to_sign = timestamp_str + "\n" + self.secret
+        # 飞书官方示例代码（使用时间戳+换行符+密钥作为字符串）
+        string_to_sign = '{}\n{}'.format(timestamp_str, self.secret)
         
         # 使用HMAC-SHA256计算签名
-        # 以secret作为key，签名字符串作为message进行签名
         hmac_code = hmac.new(
-            self.secret.encode('utf-8'),
-            string_to_sign.encode('utf-8'),
+            string_to_sign.encode("utf-8"),  # 使用"时间戳\n密钥"作为密钥
             digestmod=hashlib.sha256
         ).digest()
         
@@ -63,162 +61,193 @@ class LarkNotifier:
         logger.debug(f"Generated sign for timestamp {timestamp}: {sign}")
         return sign
     
+    def _get_card_content(self, movement: dict) -> dict:
+        """Generate card content for Lark notification.
+        
+        Args:
+            movement: A movement dictionary
+            
+        Returns:
+            Card content dictionary
+        """
+        logger.debug(f"Formatting card message for one abnormal movement: {movement}")
+        
+        exchange = movement.get('exchange', 'Unknown')
+        symbol = movement.get('symbol', 'Unknown')
+        timestamp = movement.get('timestamp', '')
+        current_price = movement.get('current_price', 0.0)
+        price_change = movement.get('price_change_percent', 0.0)
+        volume_ratio = movement.get('volume_ratio', 0.0)
+        notes = movement.get('notes', '')
+        
+        color = "red" if price_change > 0 else "green"
+        title = f"{exchange} | {symbol} | 价格{'上涨' if price_change > 0 else '下跌'} {abs(price_change):.2f}%"
+        
+        elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**交易所**: {exchange}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**交易对**: {symbol}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**时间**: {timestamp}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**当前价格**: {current_price}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**价格变动**: {price_change:.2f}%"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**成交量比**: {volume_ratio:.2f}"
+                }
+            }
+        ]
+        
+        # 添加notes字段（如果存在）
+        if notes:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**备注**: {notes}"
+                }
+            })
+        
+        card = {
+            "elements": elements,
+            "header": {
+                "template": color,
+                "title": {
+                    "content": title,
+                    "tag": "plain_text"
+                }
+            }
+        }
+        
+        return {"msg_type": "interactive", "card": card}
+    
     def format_card_message(self, abnormal_movements: List[Dict[str, Any]]) -> Dict:
         """Format abnormal movements data as a Lark interactive card.
         
         Args:
-            abnormal_movements: List of detected abnormal market movements
+            abnormal_movements: List of abnormal movements
             
         Returns:
-            Formatted Lark card message
+            Formatted message dictionary
         """
-        timestamp = int(time.time())
-        
-        # Debug日志，记录接收到的异常数据
-        logger.debug(f"Formatting card message for {len(abnormal_movements)} abnormal movements at timestamp {timestamp}")
-        for i, movement in enumerate(abnormal_movements):
-            logger.debug(f"Movement {i+1}: {json.dumps(movement, default=str)}")
-        
-        # Sort movements by price change (descending)
-        try:
-            sorted_movements = sorted(
-                abnormal_movements, 
-                key=lambda x: x['price_change_percent'], 
-                reverse=True
-            )
-        except (KeyError, TypeError) as e:
-            logger.error(f"Failed to sort movements: {str(e)}")
-            sorted_movements = abnormal_movements
-        
-        # Create the card elements
+        if not abnormal_movements:
+            return None
+            
+        # 如果只有一个异常波动，直接使用单个卡片
+        if len(abnormal_movements) == 1:
+            return self._get_card_content(abnormal_movements[0])
+            
+        # 多个异常波动时，创建一个汇总卡片
         elements = []
-        
-        # Add header
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": "**🚨 异常行情监测报告 🚨**"
-            }
-        })
-        
-        # Add timestamp
-        current_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(timestamp))
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": f"**扫描时间**: {current_time}"
-            }
-        })
-        
-        # Add divider
-        elements.append({"tag": "hr"})
-        
-        # Add each abnormal movement
-        for idx, movement in enumerate(sorted_movements[:10]):  # Limit to top 10
-            try:
-                # 确保is_future字段存在，如果不存在则默认为False
-                is_future = movement.get('is_future', False)
-                market_type = "合约" if is_future else "现货"
-                
-                # 确保volume_ratio字段存在
-                volume_ratio = movement.get('volume_ratio', movement.get('volume_change_ratio', 1.0))
-                
-                # 获取其他字段，添加默认值和错误处理
-                symbol = movement.get('symbol', 'Unknown')
-                exchange = movement.get('exchange', 'Unknown')
-                price_change = movement.get('price_change_percent', 0)
-                current_price = movement.get('current_price', 0)
-                timestamp_str = movement.get('timestamp', 'Unknown')
-                
+        for i, movement in enumerate(abnormal_movements, 1):
+            exchange = movement.get('exchange', 'Unknown')
+            symbol = movement.get('symbol', 'Unknown')
+            price_change = movement.get('price_change_percent', 0.0)
+            volume_ratio = movement.get('volume_ratio', 0.0)
+            
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**{i}. {exchange} | {symbol}** - 价格变动: {price_change:.2f}%, 成交量比: {volume_ratio:.2f}"
+                }
+            })
+            
+            # 添加分隔线，除了最后一个
+            if i < len(abnormal_movements):
                 elements.append({
-                    "tag": "div",
-                    "text": {
-                        "tag": "lark_md",
-                        "content": (
-                            f"**{idx+1}. {symbol}** ({exchange} {market_type})\n"
-                            f"📈 价格变动: **+{price_change:.2f}%**\n"
-                            f"📊 成交量倍数: **{volume_ratio:.2f}x**\n"
-                            f"💰 当前价格: {current_price}\n"
-                            f"⏰ 触发时间: {timestamp_str}"
-                        )
-                    }
+                    "tag": "hr"
                 })
                 
-                # Add divider between items
-                if idx < len(sorted_movements[:10]) - 1:
-                    elements.append({"tag": "hr"})
-            except Exception as e:
-                logger.error(f"Error formatting movement {idx}: {str(e)}")
-                continue
-        
-        # Build the card message
         card = {
-            "config": {
-                "wide_screen_mode": True
-            },
+            "elements": elements,
             "header": {
+                "template": "red",
                 "title": {
-                    "tag": "plain_text",
-                    "content": f"发现 {len(abnormal_movements)} 个异常上涨交易对"
-                },
-                "template": "red" if len(abnormal_movements) > 5 else "orange"
-            },
-            "elements": elements
+                    "content": f"检测到 {len(abnormal_movements)} 个异常行情",
+                    "tag": "plain_text"
+                }
+            }
         }
         
-        # Build the final message
-        message = {
-            "timestamp": timestamp,
-            "sign": self._generate_sign(timestamp),
-            "msg_type": "interactive",
-            "card": card
-        }
-        
-        return message
+        return {"msg_type": "interactive", "card": card}
     
     def send_notification(self, abnormal_movements: List[Dict[str, Any]]) -> bool:
-        """Send notifications about abnormal market movements to Lark.
+        """Send notification of abnormal movements to Lark.
         
         Args:
             abnormal_movements: List of detected abnormal market movements
             
         Returns:
-            True if notification was sent successfully, False otherwise
+            True if message was sent successfully, False otherwise
         """
         if not abnormal_movements:
-            logger.info("No abnormal movements to notify about")
-            return True
+            logger.warning("No abnormal movements to send notification for")
+            return False
             
         if not self.webhook_url:
-            logger.error("Lark webhook URL not configured")
+            logger.error("Lark webhook URL is not configured")
             return False
+            
+        # 格式化消息
+        message = self.format_card_message(abnormal_movements)
+        if not message:
+            logger.error("Failed to format card message")
+            return False
+            
+        # 添加时间戳和签名
+        timestamp = int(time.time())
+        message["timestamp"] = timestamp
+        message["sign"] = self._generate_sign(timestamp)
         
         try:
-            # Format message
-            message = self.format_card_message(abnormal_movements)
-            
-            # Send to Lark
-            response = requests.post(
-                url=self.webhook_url,
-                headers={"Content-Type": "application/json"},
-                data=json.dumps(message)
-            )
+            # 发送请求
+            response = requests.post(self.webhook_url, json=message)
+            response_text = response.text
             
             if response.status_code == 200:
-                response_data = response.json()
-                if response_data.get("code") == 0:
-                    logger.info(f"Successfully sent notification for {len(abnormal_movements)} abnormal movements")
+                response_json = response.json()
+                if response_json.get('code') == 0:
+                    logger.info(f"Successfully sent Lark notification for {len(abnormal_movements)} movements")
                     return True
                 else:
-                    logger.error(f"Lark API error: {response_data}")
+                    logger.error(f"Failed to send Lark notification: {response_json}")
+                    return False
             else:
-                logger.error(f"Failed to send notification: HTTP {response.status_code}")
-            
-            return False
+                logger.error(f"Failed to send Lark notification, status code: {response.status_code}, response: {response_text}")
+                return False
         except Exception as e:
-            logger.error(f"Exception while sending notification: {str(e)}")
+            logger.exception(f"Error sending Lark notification: {str(e)}")
             return False
 
     def test_notification(self) -> bool:
@@ -245,6 +274,16 @@ class LarkNotifier:
                 'is_future': False,
                 'detected_at': datetime.now()
             }
+            
+            # 添加可能的关键词
+            logger.info("Trying to send test message with common keywords")
+            common_keywords = [
+                "notification", "通知"
+            ]
+            
+            # 添加这些关键词到测试消息中
+            keyword_text = " ".join(common_keywords)
+            test_movement['notes'] = f"测试消息 {keyword_text}"
             
             # Send test notification
             result = self.send_notification([test_movement])
