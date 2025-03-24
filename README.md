@@ -239,3 +239,22 @@ RETRY_DELAY_SECONDS=2
   - `fetcher/websocket_data_subscriber.py`: WebSocket订阅器
   - `analyzer/realtime_analyzer.py`: 实时分析器
   - `event_driven_main.py`: 事件驱动主程序
+
+## 使用方法
+
+### 资源清理与内存管理
+
+CryptoRador事件驱动版本使用WebSocket连接实时获取数据，程序退出时会自动清理所有资源，包括：
+
+1. 关闭所有交易所WebSocket连接
+2. 释放所有aiohttp会话和连接
+3. 取消所有未完成的异步任务
+4. 清理内存中的数据缓存
+
+这确保了程序在退出时不会有资源泄漏，特别是在长时间运行后进行重启的情况下。
+
+如果你观察到"Unclosed client session"或"Unclosed connector"警告，可以尝试以下解决方法：
+
+1. 使用Ctrl+C而不是终端的强制关闭按钮来停止程序
+2. 确保程序有足够的时间(1-2秒)来清理资源
+3. 如果问题持续存在，可以升级到最新版本，或者检查日志中的错误信息

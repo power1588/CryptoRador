@@ -96,7 +96,13 @@ class LarkNotifier:
         
         # Add each abnormal movement
         for idx, movement in enumerate(sorted_movements[:10]):  # Limit to top 10
-            market_type = "合约" if movement['is_future'] else "现货"
+            # 确保is_future字段存在，如果不存在则默认为False
+            is_future = movement.get('is_future', False)
+            market_type = "合约" if is_future else "现货"
+            
+            # 确保volume_ratio字段存在
+            volume_ratio = movement.get('volume_ratio', movement.get('volume_change_ratio', 1.0))
+            
             elements.append({
                 "tag": "div",
                 "text": {
@@ -104,7 +110,7 @@ class LarkNotifier:
                     "content": (
                         f"**{idx+1}. {movement['symbol']}** ({movement['exchange']} {market_type})\n"
                         f"📈 价格变动: **+{movement['price_change_percent']}%**\n"
-                        f"📊 成交量倍数: **{movement['volume_ratio']}x**\n"
+                        f"📊 成交量倍数: **{volume_ratio}x**\n"
                         f"💰 当前价格: {movement['current_price']}\n"
                         f"⏰ 触发时间: {movement['timestamp']}"
                     )

@@ -57,12 +57,15 @@ class EventDrivenCryptoRador:
         if anomaly:
             # 创建包含单个异常的列表用于通知
             anomalies = [anomaly]
-            notification_success = self.notifier.send_notification(anomalies)
-            
-            if notification_success:
-                logger.info(f"Notification sent for {symbol} on {exchange_id}")
-            else:
-                logger.error(f"Failed to send notification for {symbol} on {exchange_id}")
+            try:
+                notification_success = self.notifier.send_notification(anomalies)
+                
+                if notification_success:
+                    logger.info(f"Notification sent for {symbol} on {exchange_id}")
+                else:
+                    logger.error(f"Failed to send notification for {symbol} on {exchange_id}")
+            except Exception as e:
+                logger.error(f"Exception when sending notification for {symbol} on {exchange_id}: {str(e)}")
     
     async def periodic_maintenance(self):
         """定期执行维护任务"""
@@ -135,10 +138,28 @@ class EventDrivenCryptoRador:
         
         try:
             # 停止数据订阅器
+            logger.info("Stopping data subscriber and closing all connections...")
             await self.data_subscriber.stop()
+            
+            # 显式清理资源，帮助垃圾回收
+            self.data_subscriber = None
+            
+            # 等待一小段时间以确保所有资源都被释放
+            await asyncio.sleep(1.0)
+            
+            # 额外步骤：检查和关闭所有未关闭的aiohttp客户端会话
+            for task in asyncio.all_tasks():
+                if task.get_coro().__qualname__.startswith(('ClientSession', 'TCPConnector')):
+                    try:
+                        logger.info(f"Cancelling lingering task: {task.get_coro().__qualname__}")
+                        task.cancel()
+                    except Exception as e:
+                        logger.warning(f"Error cancelling task: {str(e)}")
+            
             logger.info("EventDrivenCryptoRador shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {str(e)}")
+            logger.error(traceback.format_exc())
     
     def handle_signal(self, sig, frame):
         """处理信号(如CTRL+C)"""
@@ -164,6 +185,16 @@ async def main_async():
         logger.error(f"Unhandled exception: {str(e)}")
         logger.error(traceback.format_exc())
         await app.shutdown()
+    finally:
+        # 确保资源被释放
+        if app.running:
+            await app.shutdown()
+        # 手动清理循环中的任务
+        tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("All tasks cancelled and resources released")
 
 def main():
     """主入口点"""
@@ -171,9 +202,24 @@ def main():
         # 在Windows上需要使用不同的事件循环策略
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        
+        # 获取或创建事件循环
+        loop = asyncio.get_event_loop()
+        # 增加调试
+        if settings.LOG_LEVEL == "DEBUG":
+            loop.set_debug(True)
             
         # 运行异步主函数
-        asyncio.run(main_async())
+        loop.run_until_complete(main_async())
+        
+        # 在正常退出前，清理剩余资源
+        pending = asyncio.all_tasks(loop=loop)
+        if pending:
+            logger.info(f"Cleaning up {len(pending)} pending tasks...")
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        
+        # 关闭事件循环
+        loop.close()
     except KeyboardInterrupt:
         logger.info("Program interrupted")
     except Exception as e:

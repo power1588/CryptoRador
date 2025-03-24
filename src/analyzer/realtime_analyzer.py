@@ -41,6 +41,29 @@ class RealtimeMarketAnalyzer:
         logger.info(f"Initialized RealtimeMarketAnalyzer with: price_threshold={self.price_increase_threshold}%, "
                    f"volume_threshold={self.volume_spike_threshold}x, lookback={self.lookback_periods} periods")
     
+    def is_future_contract(self, symbol: str) -> bool:
+        """判断是否是期货合约
+        
+        Args:
+            symbol: 交易对符号
+            
+        Returns:
+            True如果是期货合约，否则False
+        """
+        # 检查常见的期货标识
+        return (
+            ('PERP' in symbol) or 
+            (':USDT' in symbol) or
+            ('_PERP' in symbol) or
+            ('/USDT-PERP' in symbol) or
+            ('-SWAP' in symbol) or
+            ('-FUTURES' in symbol) or
+            ('_usd_' in symbol.lower()) or
+            ('-usd-' in symbol.lower()) or
+            ('/USD:' in symbol) or
+            ('/USDT:' in symbol)
+        )
+    
     async def on_new_kline(self, exchange_id: str, symbol: str, 
                     kline_data: pd.DataFrame, is_new_candle: bool) -> Optional[Dict]:
         """处理新的K线数据
@@ -99,6 +122,9 @@ class RealtimeMarketAnalyzer:
             
             # 同时满足价格和成交量异常条件
             if is_abnormal_price and is_abnormal_volume:
+                # 检查是否是期货合约
+                is_future = self.is_future_contract(symbol)
+                
                 # 创建异常信息
                 anomaly = {
                     'exchange': exchange_id,
@@ -110,7 +136,9 @@ class RealtimeMarketAnalyzer:
                     'current_volume': latest_volume,
                     'average_volume': avg_volume,
                     'volume_change_ratio': volume_change_ratio,
-                    'detected_at': datetime.now()
+                    'detected_at': datetime.now(),
+                    'is_future': is_future,  # 添加期货标识
+                    'volume_ratio': volume_change_ratio  # 添加兼容性字段
                 }
                 
                 # 保存到最近异常列表

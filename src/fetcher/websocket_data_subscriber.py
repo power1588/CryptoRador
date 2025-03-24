@@ -400,23 +400,27 @@ class WebSocketDataSubscriber:
             self.active_subscriptions[exchange_id].clear()
         
         # 关闭所有交易所连接
-        close_tasks = []
-        for exchange_id, exchange in self.exchanges.items():
+        for exchange_id, exchange in list(self.exchanges.items()):
             if exchange:
                 try:
-                    task = asyncio.create_task(exchange.close())
-                    close_tasks.append((exchange_id, task))
+                    logger.info(f"Closing connection to {exchange_id}...")
+                    await exchange.close()
+                    logger.info(f"Closed WebSocket connection to {exchange_id}")
+                    # 移除交易所引用，帮助垃圾回收
+                    del self.exchanges[exchange_id]
                 except Exception as e:
-                    logger.error(f"Error creating close task for {exchange_id}: {str(e)}")
+                    logger.error(f"Error closing WebSocket connection to {exchange_id}: {str(e)}")
         
-        # 等待所有关闭任务完成
-        for exchange_id, task in close_tasks:
-            try:
-                await asyncio.wait_for(task, timeout=5.0)
-                logger.info(f"Closed WebSocket connection to {exchange_id}")
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout closing WebSocket connection to {exchange_id}")
-            except Exception as e:
-                logger.error(f"Error closing WebSocket connection to {exchange_id}: {str(e)}")
+        # 清空数据缓冲区
+        for exchange_id in self.data_buffers:
+            self.data_buffers[exchange_id].clear()
+        
+        # 确保所有数据结构都被清空，帮助垃圾回收
+        self.subscription_callbacks.clear()
+        self.symbol_metadata.clear()
+        self.invalid_symbols.clear()
+        
+        # 等待一小段时间，确保所有异步资源都被释放
+        await asyncio.sleep(0.5)
         
         logger.info("WebSocket data subscriber stopped") 
