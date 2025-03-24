@@ -400,16 +400,34 @@ class WebSocketDataSubscriber:
             self.active_subscriptions[exchange_id].clear()
         
         # 关闭所有交易所连接
+        exchange_close_tasks = []
+        
+        # 创建所有交易所的关闭任务
         for exchange_id, exchange in list(self.exchanges.items()):
             if exchange:
                 try:
-                    logger.info(f"Closing connection to {exchange_id}...")
-                    await exchange.close()
-                    logger.info(f"Closed WebSocket connection to {exchange_id}")
-                    # 移除交易所引用，帮助垃圾回收
-                    del self.exchanges[exchange_id]
+                    logger.info(f"Scheduling close for {exchange_id} WebSocket connection...")
+                    # 创建任务但不立即等待，以便并行关闭所有交易所
+                    task = asyncio.create_task(exchange.close())
+                    task.set_name(f"close_{exchange_id}")
+                    exchange_close_tasks.append((exchange_id, task))
                 except Exception as e:
-                    logger.error(f"Error closing WebSocket connection to {exchange_id}: {str(e)}")
+                    logger.error(f"Error creating close task for {exchange_id}: {str(e)}")
+        
+        # 等待所有关闭任务完成，设置超时
+        for exchange_id, task in exchange_close_tasks:
+            try:
+                # 设置较长的超时，因为有些交易所关闭可能需要时间
+                await asyncio.wait_for(task, timeout=10.0)
+                logger.info(f"Successfully closed WebSocket connection to {exchange_id}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout closing connection to {exchange_id}")
+            except Exception as e:
+                logger.error(f"Error closing WebSocket connection to {exchange_id}: {str(e)}")
+            
+            # 无论成功与否，移除交易所引用，帮助垃圾回收
+            if exchange_id in self.exchanges:
+                del self.exchanges[exchange_id]
         
         # 清空数据缓冲区
         for exchange_id in self.data_buffers:
@@ -421,6 +439,16 @@ class WebSocketDataSubscriber:
         self.invalid_symbols.clear()
         
         # 等待一小段时间，确保所有异步资源都被释放
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0)
+        
+        # 检查并取消任何剩余的与交易所相关的任务
+        for task in asyncio.all_tasks():
+            task_name = task.get_name()
+            if any(ex_id in task_name for ex_id in settings.EXCHANGES) or "ccxt" in str(task).lower():
+                try:
+                    logger.info(f"Cancelling lingering task: {task}")
+                    task.cancel()
+                except Exception as e:
+                    logger.warning(f"Error cancelling task: {str(e)}")
         
         logger.info("WebSocket data subscriber stopped") 

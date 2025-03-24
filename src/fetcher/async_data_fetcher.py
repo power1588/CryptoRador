@@ -335,29 +335,58 @@ class AsyncMarketDataFetcher:
         return result
     
     async def close_all(self):
-        """关闭所有交易所连接"""
+        """关闭所有交易所连接并清理资源"""
+        logger.info("Closing all exchange connections")
         close_tasks = []
         
-        for exchange_id, exchange in self.exchanges.items():
+        # 创建并行关闭任务
+        for exchange_id, exchange in list(self.exchanges.items()):
             if exchange:
                 try:
                     # 创建关闭任务
+                    logger.info(f"Scheduling close for {exchange_id}...")
                     task = asyncio.create_task(exchange.close())
+                    task.set_name(f"close_{exchange_id}")
                     close_tasks.append((exchange_id, task))
                 except Exception as e:
                     logger.error(f"Error creating close task for {exchange_id}: {str(e)}")
         
-        # 等待所有关闭任务完成
+        # 等待所有关闭任务完成，带超时
         for exchange_id, task in close_tasks:
             try:
-                await asyncio.wait_for(task, timeout=5.0)  # 设置超时以避免无限等待
+                # 设置较长的超时以避免无限等待
+                await asyncio.wait_for(task, timeout=10.0)
                 logger.info(f"Closed connection to {exchange_id}")
+                
+                # 删除交易所引用，帮助垃圾回收
+                if exchange_id in self.exchanges:
+                    del self.exchanges[exchange_id]
             except asyncio.TimeoutError:
                 logger.warning(f"Timeout closing connection to {exchange_id}")
             except Exception as e:
                 logger.error(f"Error closing {exchange_id} connection: {str(e)}")
         
+        # 清理所有相关数据结构
+        self.exchanges.clear()
+        
+        # 检查并取消任何剩余的与交易所相关的任务
+        for task in asyncio.all_tasks():
+            task_name = task.get_name()
+            task_str = str(task).lower()
+            if (any(ex_id in task_name for ex_id in settings.EXCHANGES) or 
+                "ccxt" in task_str or "exchange" in task_str):
+                try:
+                    logger.info(f"Cancelling lingering exchange task: {task}")
+                    task.cancel()
+                except Exception as e:
+                    logger.warning(f"Error cancelling task: {str(e)}")
+        
+        # 等待一小段时间以确保资源释放
+        await asyncio.sleep(1.0)
+        
         # 记录收集到的无效交易对信息
         for exchange_id, symbols in self.invalid_symbols.items():
             if symbols:
-                logger.info(f"Collected {len(symbols)} invalid symbols for {exchange_id}") 
+                logger.info(f"Collected {len(symbols)} invalid symbols for {exchange_id}")
+                
+        logger.info("All exchange connections closed") 

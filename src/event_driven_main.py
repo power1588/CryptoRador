@@ -147,14 +147,40 @@ class EventDrivenCryptoRador:
             # 等待一小段时间以确保所有资源都被释放
             await asyncio.sleep(1.0)
             
-            # 额外步骤：检查和关闭所有未关闭的aiohttp客户端会话
+            # 清理aiohttp会话和连接器
+            tasks_to_cancel = []
             for task in asyncio.all_tasks():
-                if task.get_coro().__qualname__.startswith(('ClientSession', 'TCPConnector')):
-                    try:
-                        logger.info(f"Cancelling lingering task: {task.get_coro().__qualname__}")
-                        task.cancel()
-                    except Exception as e:
-                        logger.warning(f"Error cancelling task: {str(e)}")
+                # 检查是否是aiohttp相关任务
+                task_name = task.get_name()
+                task_coro_name = getattr(task.get_coro(), '__qualname__', '')
+                
+                if any(name in task_coro_name for name in ('ClientSession', 'TCPConnector', 'aiohttp')):
+                    logger.info(f"Found lingering aiohttp task: {task_coro_name}")
+                    tasks_to_cancel.append(task)
+                # ccxt相关任务也应该被取消
+                elif "ccxt" in task_coro_name.lower():
+                    logger.info(f"Found lingering ccxt task: {task_coro_name}")
+                    tasks_to_cancel.append(task)
+            
+            # 取消收集到的任务
+            for task in tasks_to_cancel:
+                try:
+                    logger.info(f"Cancelling task: {task}")
+                    task.cancel()
+                except Exception as e:
+                    logger.warning(f"Error cancelling task: {str(e)}")
+            
+            # 等待所有取消的任务完成
+            if tasks_to_cancel:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+                logger.info(f"Cancelled {len(tasks_to_cancel)} lingering tasks")
+            
+            # 强制关闭可能存在的aiohttp会话
+            import aiohttp
+            for session in list(aiohttp.ClientSession._instances):
+                if not session.closed:
+                    logger.info(f"Closing unclosed ClientSession")
+                    await session.close()
             
             logger.info("EventDrivenCryptoRador shutdown complete")
         except Exception as e:
@@ -189,12 +215,35 @@ async def main_async():
         # 确保资源被释放
         if app.running:
             await app.shutdown()
+        
         # 手动清理循环中的任务
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        logger.info("All tasks cancelled and resources released")
+        if tasks:
+            logger.info(f"Cancelling {len(tasks)} remaining tasks...")
+            for task in tasks:
+                task.cancel()
+            
+            # 等待所有任务取消完成
+            await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info("All tasks cancelled")
+        
+        # 特别检查aiohttp会话
+        try:
+            import aiohttp
+            import gc
+            
+            # 强制垃圾回收，帮助发现未关闭的会话
+            gc.collect()
+            
+            # 检查并关闭所有未关闭的会话
+            for obj in gc.get_objects():
+                if isinstance(obj, aiohttp.ClientSession) and not obj.closed:
+                    logger.warning(f"Found unclosed ClientSession: {obj}")
+                    await obj.close()
+        except Exception as e:
+            logger.error(f"Error during final cleanup: {str(e)}")
+            
+        logger.info("All resources released")
 
 def main():
     """主入口点"""
@@ -205,6 +254,7 @@ def main():
         
         # 获取或创建事件循环
         loop = asyncio.get_event_loop()
+        
         # 增加调试
         if settings.LOG_LEVEL == "DEBUG":
             loop.set_debug(True)
@@ -216,10 +266,17 @@ def main():
         pending = asyncio.all_tasks(loop=loop)
         if pending:
             logger.info(f"Cleaning up {len(pending)} pending tasks...")
+            # 取消所有剩余任务
+            for task in pending:
+                task.cancel()
+            # 等待任务取消完成
             loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         
         # 关闭事件循环
+        loop.run_until_complete(loop.shutdown_asyncgens())
         loop.close()
+        
+        logger.info("程序正常退出")
     except KeyboardInterrupt:
         logger.info("Program interrupted")
     except Exception as e:
