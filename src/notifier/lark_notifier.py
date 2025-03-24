@@ -175,6 +175,15 @@ class LarkNotifier:
                     "content": f"**备注**: {notes}"
                 }
             })
+            
+        # 添加必需的关键词(使用斜体和小字体，不显眼但确保存在)
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"_crypto market alert_"
+            }
+        })
         
         card = {
             "elements": elements,
@@ -269,6 +278,15 @@ class LarkNotifier:
                     "tag": "hr"
                 })
                 
+        # 添加必需的关键词(使用斜体和小字体，不显眼但确保存在)
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"_crypto market alert_"
+            }
+        })
+                
         card = {
             "elements": elements,
             "header": {
@@ -355,15 +373,8 @@ class LarkNotifier:
                 'detected_at': datetime.now()
             }
             
-            # 添加可能的关键词
-            logger.info("Trying to send test message with common keywords")
-            common_keywords = [
-                "notification", "通知"
-            ]
-            
-            # 添加这些关键词到测试消息中
-            keyword_text = " ".join(common_keywords)
-            test_movement['notes'] = f"测试消息 {keyword_text}"
+            # 添加测试消息备注
+            test_movement['notes'] = "测试消息 - 验证飞书通知功能是否正常"
             
             # Send test notification
             result = self.send_notification([test_movement])
