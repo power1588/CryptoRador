@@ -80,6 +80,12 @@ class LarkNotifier:
         volume_ratio = movement.get('volume_ratio', 0.0)
         notes = movement.get('notes', '')
         
+        # 价格分位数信息
+        price_percentile = movement.get('price_percentile', None)
+        price_30d_high = movement.get('30d_high', None)
+        price_30d_low = movement.get('30d_low', None)
+        price_30d_avg = movement.get('30d_avg', None)
+        
         color = "red" if price_change > 0 else "green"
         title = f"{exchange} | {symbol} | 价格{'上涨' if price_change > 0 else '下跌'} {abs(price_change):.2f}%"
         
@@ -128,6 +134,36 @@ class LarkNotifier:
             }
         ]
         
+        # 添加价格分位数信息（如果存在）
+        if price_percentile is not None:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**30天价格分位**: {price_percentile:.2f}%"
+                }
+            })
+            
+            # 添加一个可视化的分位数指示器
+            percentile_bar = self._create_percentile_bar(price_percentile)
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"{percentile_bar}"
+                }
+            })
+            
+            # 添加30天高低价信息
+            if price_30d_high is not None and price_30d_low is not None:
+                elements.append({
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**30天价格区间**: {price_30d_low:.2f} - {price_30d_high:.2f}"
+                    }
+                })
+        
         # 添加notes字段（如果存在）
         if notes:
             elements.append({
@@ -150,6 +186,29 @@ class LarkNotifier:
         }
         
         return {"msg_type": "interactive", "card": card}
+    
+    def _create_percentile_bar(self, percentile: float) -> str:
+        """创建一个可视化的百分位数条
+        
+        Args:
+            percentile: 0-100之间的百分位数
+            
+        Returns:
+            表示百分位的字符串
+        """
+        bar_length = 20  # 条的总长度
+        position = int(round(percentile / 100 * bar_length))
+        
+        # 确保位置在有效范围内
+        position = max(0, min(position, bar_length))
+        
+        # 使用不同的符号表示程度
+        bar = "▁" * position + "△" + "▁" * (bar_length - position - 1)
+        
+        # 在条形图下添加刻度
+        scale = "0%"+"─"*(int(bar_length/2)-2)+"50%"+"─"*(int(bar_length/2)-2)+"100%"
+        
+        return f"```\n{bar}\n{scale}\n```"
     
     def format_card_message(self, abnormal_movements: List[Dict[str, Any]]) -> Dict:
         """Format abnormal movements data as a Lark interactive card.
@@ -174,12 +233,31 @@ class LarkNotifier:
             symbol = movement.get('symbol', 'Unknown')
             price_change = movement.get('price_change_percent', 0.0)
             volume_ratio = movement.get('volume_ratio', 0.0)
+            current_price = movement.get('current_price', 0.0)
+            
+            # 价格分位数信息
+            price_percentile = movement.get('price_percentile', None)
+            price_30d_high = movement.get('30d_high', None)
+            price_30d_low = movement.get('30d_low', None)
+            
+            # 基本信息
+            content = f"**{i}. {exchange} | {symbol}**\n"
+            content += f"价格: {current_price} (变动: {price_change:.2f}%)\n"
+            content += f"成交量比: {volume_ratio:.2f}x\n"
+            
+            # 添加价格分位数信息（如果存在）
+            if price_percentile is not None:
+                content += f"30天价格分位: {price_percentile:.2f}%\n"
+                
+                # 如果有30天高低价信息
+                if price_30d_high is not None and price_30d_low is not None:
+                    content += f"30天区间: {price_30d_low:.2f} - {price_30d_high:.2f}"
             
             elements.append({
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**{i}. {exchange} | {symbol}** - 价格变动: {price_change:.2f}%, 成交量比: {volume_ratio:.2f}"
+                    "content": content
                 }
             })
             

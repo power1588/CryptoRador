@@ -3,8 +3,10 @@ import sys
 import logging
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable, Tuple
 from datetime import datetime, timedelta
+import asyncio
+import ccxt.pro as ccxtpro
 
 # 修复导入路径问题
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -38,8 +40,106 @@ class RealtimeMarketAnalyzer:
         # 默认冷却时间(秒)
         self.cooldown_seconds = 3600  # 1小时
         
+        # 缓存获取的30天历史数据，减少API调用
+        self.historical_data_cache = {}
+        self.cache_expiry = {}  # 缓存过期时间 
+        
         logger.info(f"Initialized RealtimeMarketAnalyzer with: price_threshold={self.price_increase_threshold}%, "
                    f"volume_threshold={self.volume_spike_threshold}x, lookback={self.lookback_periods} periods")
+    
+    async def get_historical_daily_data(self, exchange_id: str, symbol: str, days: int = 30) -> pd.DataFrame:
+        """获取历史日K线数据
+        
+        Args:
+            exchange_id: 交易所ID
+            symbol: 交易对符号
+            days: 获取的天数
+            
+        Returns:
+            DataFrame包含历史日K线数据
+        """
+        cache_key = f"{exchange_id}:{symbol}:daily:{days}"
+        
+        # 检查缓存
+        now = datetime.now()
+        if (cache_key in self.historical_data_cache and 
+            cache_key in self.cache_expiry and 
+            now < self.cache_expiry[cache_key]):
+            logger.debug(f"Using cached historical data for {symbol} on {exchange_id}")
+            return self.historical_data_cache[cache_key]
+        
+        logger.info(f"Fetching {days} days historical daily data for {symbol} on {exchange_id}")
+        
+        try:
+            # 创建交易所实例
+            exchange_class = getattr(ccxtpro, exchange_id)
+            exchange = exchange_class({
+                'enableRateLimit': True,
+                'timeout': settings.REQUEST_TIMEOUT_SECONDS * 1000,
+            })
+            
+            # 计算开始时间 (当前时间 - days天)
+            since = int((now - timedelta(days=days)).timestamp() * 1000)
+            
+            # 获取日K线数据
+            ohlcv = await exchange.fetch_ohlcv(symbol, '1d', since, days + 5)  # 多获取几天以确保足够数据
+            
+            # 关闭交易所连接
+            await exchange.close()
+            
+            # 如果没有数据，返回空DataFrame
+            if not ohlcv or len(ohlcv) == 0:
+                logger.warning(f"No historical daily data available for {symbol} on {exchange_id}")
+                return pd.DataFrame()
+                
+            # 创建DataFrame
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # 只保留最近days天的数据
+            df = df.sort_values('timestamp', ascending=False).head(days)
+            
+            # 更新缓存
+            self.historical_data_cache[cache_key] = df
+            # 设置缓存过期时间 (6小时)
+            self.cache_expiry[cache_key] = now + timedelta(hours=6)
+            
+            logger.info(f"Successfully fetched {len(df)} days of historical data for {symbol} on {exchange_id}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching historical data for {symbol} on {exchange_id}: {str(e)}")
+            return pd.DataFrame()
+    
+    async def calculate_price_percentile(self, exchange_id: str, symbol: str, current_price: float) -> Tuple[float, pd.DataFrame]:
+        """计算当前价格在30天历史价格中的百分位数
+        
+        Args:
+            exchange_id: 交易所ID
+            symbol: 交易对符号
+            current_price: 当前价格
+            
+        Returns:
+            (百分位数, 历史数据DataFrame)
+        """
+        # 获取30天历史数据
+        df = await self.get_historical_daily_data(exchange_id, symbol)
+        
+        if df.empty:
+            logger.warning(f"No historical data available to calculate percentile for {symbol} on {exchange_id}")
+            return 0.0, df
+        
+        try:
+            # 计算百分位数
+            prices = df['close'].values
+            percentile = np.sum(prices < current_price) / len(prices) * 100
+            
+            logger.info(f"Current price {current_price} for {symbol} on {exchange_id} is at {percentile:.2f}% percentile of 30-day range")
+            return percentile, df
+            
+        except Exception as e:
+            logger.error(f"Error calculating percentile for {symbol} on {exchange_id}: {str(e)}")
+            return 0.0, df
     
     def is_future_contract(self, symbol: str) -> bool:
         """判断是否是期货合约
@@ -141,6 +241,20 @@ class RealtimeMarketAnalyzer:
                     'volume_ratio': volume_change_ratio  # 添加兼容性字段
                 }
                 
+                # 异步计算30天价格分位数
+                price_percentile, hist_data = await self.calculate_price_percentile(
+                    exchange_id, symbol, latest_price
+                )
+                
+                # 添加价格分位数信息
+                anomaly['price_percentile'] = price_percentile
+                
+                # 如果有历史数据，添加一些额外的统计数据
+                if not hist_data.empty:
+                    anomaly['30d_high'] = hist_data['high'].max()
+                    anomaly['30d_low'] = hist_data['low'].min()
+                    anomaly['30d_avg'] = hist_data['close'].mean()
+                
                 # 保存到最近异常列表
                 self.recent_anomalies[cooldown_key] = anomaly
                 
@@ -148,7 +262,8 @@ class RealtimeMarketAnalyzer:
                 self.alert_cooldowns[cooldown_key] = datetime.now()
                 
                 logger.info(f"Detected anomaly in {symbol} on {exchange_id}: "
-                          f"Price +{price_change_percent:.2f}%, Volume {volume_change_ratio:.2f}x")
+                          f"Price +{price_change_percent:.2f}% (at {price_percentile:.2f}% percentile), "
+                          f"Volume {volume_change_ratio:.2f}x")
                 
                 return anomaly
         
