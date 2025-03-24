@@ -10,6 +10,8 @@ import urllib.parse
 from typing import Dict, List, Any, Optional
 import requests
 from datetime import datetime
+import numpy as np
+import pandas as pd
 
 # 修复导入路径问题
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
