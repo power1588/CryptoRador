@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 
 """
-Lark通知测试脚本
-用于测试Lark机器人是否能正常发送通知
+测试Lark (飞书) 通知功能
+This script tests the Lark (Feishu) notification functionality.
 """
 
 import os
 import sys
 import logging
+import argparse
+import json
+import time
 from datetime import datetime
 
 # 修复导入路径问题
@@ -18,52 +21,55 @@ from src.notifier.lark_notifier import LarkNotifier
 from src.config import settings
 
 # 配置日志
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
 logger = logging.getLogger(__name__)
 
-def test_lark_notification():
-    """测试Lark通知功能"""
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='Test Lark Notification')
+    parser.add_argument('--webhook', type=str, help='Lark webhook URL (overrides settings)')
+    parser.add_argument('--secret', type=str, help='Lark webhook secret (overrides settings)')
+    parser.add_argument('--verbose', '-v', action='store_true', help='Enable verbose logging')
+    return parser.parse_args()
+
+def main():
+    """主函数"""
+    args = parse_args()
     
-    # 检查是否配置了Lark webhook URL
-    if not settings.LARK_WEBHOOK_URL:
-        logger.error("未配置Lark Webhook URL，请在.env文件中设置LARK_WEBHOOK_URL")
-        return False
+    # 设置日志级别
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        logging.getLogger().setLevel(logging.INFO)
     
-    # 创建一个测试异常行情数据
-    test_movements = [
-        {
-            'exchange': 'binance',
-            'symbol': 'BTC/USDT',
-            'price_change_percent': 2.5,
-            'volume_ratio': 7.8,
-            'current_price': 70000.0,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'is_future': False,
-        },
-        {
-            'exchange': 'okx',
-            'symbol': 'ETH/USDT',
-            'price_change_percent': 3.2,
-            'volume_ratio': 6.3,
-            'current_price': 3500.0,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'is_future': False,
-        }
-    ]
+    logger.info("Testing Lark notification...")
     
-    # 创建并初始化通知器
-    notifier = LarkNotifier()
+    # 获取webhook_url和secret
+    webhook_url = args.webhook or settings.LARK_WEBHOOK_URL
+    secret = args.secret or settings.LARK_SECRET
     
-    # 发送测试通知
-    logger.info("正在发送测试通知到Lark...")
-    result = notifier.send_notification(test_movements)
+    if not webhook_url:
+        logger.error("Error: Lark webhook URL not provided")
+        sys.exit(1)
+    
+    logger.info(f"Using webhook URL: {webhook_url}")
+    logger.info(f"Using secret: {'*' * (len(secret) if secret else 0)}")
+    
+    # 创建Lark notifier实例
+    notifier = LarkNotifier(webhook_url=webhook_url, secret=secret)
+    
+    # 使用新的测试方法
+    result = notifier.test_notification()
     
     if result:
-        logger.info("测试通知发送成功!")
+        logger.info("✅ Test passed! Lark notification sent successfully.")
     else:
-        logger.error("测试通知发送失败，请检查Lark配置")
-    
-    return result
+        logger.error("❌ Test failed! Failed to send Lark notification.")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    test_lark_notification() 
+    main() 
