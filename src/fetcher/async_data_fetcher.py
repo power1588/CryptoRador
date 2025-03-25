@@ -82,6 +82,75 @@ class AsyncMarketDataFetcher:
                 logger.error(f"Failed to initialize exchange {exchange_id}: {str(e)}")
                 if exchange_id in self.exchanges:
                     del self.exchanges[exchange_id]
+                    
+    async def initialize_specific_exchanges(self, exchange_ids: List[str], max_concurrent_requests=None):
+        """异步初始化指定的交易所连接
+        
+        Args:
+            exchange_ids: 要初始化的交易所ID列表
+            max_concurrent_requests: 最大并发请求数
+        """
+        # 如果未指定，则使用配置中的值
+        if max_concurrent_requests is None:
+            max_concurrent_requests = settings.MAX_CONCURRENT_REQUESTS
+            
+        # 创建并发控制信号量
+        self.semaphore = asyncio.Semaphore(max_concurrent_requests)
+        logger.info(f"Initialized semaphore with {max_concurrent_requests} max concurrent requests")
+        
+        # 初始化无效交易对字典
+        for exchange_id in exchange_ids:
+            self.invalid_symbols[exchange_id] = set()
+        
+        for exchange_id in exchange_ids:
+            try:
+                # 检查交易所是否存在
+                if not hasattr(ccxtpro, exchange_id):
+                    logger.error(f"Exchange {exchange_id} not found in ccxt.pro")
+                    continue
+                    
+                # 获取交易所类
+                exchange_class = getattr(ccxtpro, exchange_id)
+                
+                # 配置交易所
+                config = {}
+                if not settings.USE_PUBLIC_DATA_ONLY and exchange_id in settings.API_KEYS:
+                    api_config = settings.API_KEYS[exchange_id]
+                    # 只有当凭证不为空时才添加
+                    if api_config.get('api_key') and api_config.get('secret'):
+                        config = api_config
+                        logger.info(f"Using API credentials for {exchange_id}")
+                    else:
+                        logger.info(f"API credentials for {exchange_id} not provided, using public API")
+                else:
+                    logger.info(f"Using public API for {exchange_id} (public-only mode: {settings.USE_PUBLIC_DATA_ONLY})")
+                
+                # 添加通用配置
+                config.update({
+                    'enableRateLimit': True,
+                    'timeout': settings.REQUEST_TIMEOUT_SECONDS * 1000,  # 毫秒
+                    'rateLimit': int(1000 / settings.RATE_LIMIT_FACTOR),  # 调整速率限制
+                })
+                
+                # 创建交易所实例
+                self.exchanges[exchange_id] = exchange_class(config)
+                logger.info(f"Initialized exchange: {exchange_id} with timeout={config['timeout']}ms")
+                
+                # 预加载市场以验证连接是否工作
+                await asyncio.wait_for(
+                    self.exchanges[exchange_id].load_markets(),
+                    timeout=settings.REQUEST_TIMEOUT_SECONDS
+                )
+                logger.info(f"Successfully loaded markets for {exchange_id}")
+                
+            except asyncio.TimeoutError:
+                logger.error(f"Timeout initializing exchange {exchange_id}")
+                if exchange_id in self.exchanges:
+                    del self.exchanges[exchange_id]
+            except Exception as e:
+                logger.error(f"Failed to initialize exchange {exchange_id}: {str(e)}")
+                if exchange_id in self.exchanges:
+                    del self.exchanges[exchange_id]
     
     async def get_all_markets(self, exchange_id: str, market_type: str = 'spot') -> List[Dict]:
         """异步获取交易所的所有交易对
@@ -389,4 +458,106 @@ class AsyncMarketDataFetcher:
             if symbols:
                 logger.info(f"Collected {len(symbols)} invalid symbols for {exchange_id}")
                 
-        logger.info("All exchange connections closed") 
+        logger.info("All exchange connections closed")
+
+    async def fetch_perp_contract_data(self, lookback_minutes: int = 5, exchanges: List[str] = None) -> Dict[str, Dict[str, pd.DataFrame]]:
+        """仅异步获取永续合约的近期市场数据
+        
+        Args:
+            lookback_minutes: 获取历史数据的分钟数
+            exchanges: 要获取数据的交易所列表，如果为None则使用settings.PERP_EXCHANGES
+            
+        Returns:
+            交易所 -> 市场类型 -> 符号 -> DataFrame的字典
+        """
+        result = {}
+        since = int((datetime.now() - timedelta(minutes=lookback_minutes)).timestamp() * 1000)
+        
+        # 使用参数指定的交易所或默认使用配置中的PERP_EXCHANGES
+        target_exchanges = exchanges or settings.PERP_EXCHANGES
+        
+        # 只处理初始化成功的交易所
+        available_exchanges = [ex for ex in target_exchanges if ex in self.exchanges]
+        
+        # 为每个交易所创建结果字典
+        for exchange_id in available_exchanges:
+            result[exchange_id] = {'future': {}}
+            
+        # 创建所有获取任务
+        all_tasks = []
+        for exchange_id in available_exchanges:
+            # 只获取期货市场类型
+            markets = await self.get_all_markets(exchange_id, 'future')
+            
+            # 限制处理的市场数量
+            if len(markets) > 500:
+                logger.info(f"Too many markets ({len(markets)}) on {exchange_id}, sampling a subset for efficiency")
+                # 根据交易量或其他指标排序可能更有价值，这里简单取前500个
+                markets = markets[:500]
+            
+            for market in markets:
+                symbol = market['symbol']
+                # 跳过已知的无效交易对
+                if symbol in self.invalid_symbols[exchange_id]:
+                    continue
+                    
+                # 仅处理USDT计价的永续合约
+                if 'USDT' not in symbol:
+                    continue
+                    
+                # 创建任务信息元组
+                task_info = (exchange_id, symbol)
+                all_tasks.append(task_info)
+        
+        logger.info(f"Prepared {len(all_tasks)} fetch tasks for perpetual contracts across {len(available_exchanges)} exchanges")
+        
+        # 使用批处理方式执行任务
+        batch_size = min(100, len(all_tasks))
+        success_count = 0
+        processed = 0
+        start_time = time.time()
+        
+        # 分批处理所有任务
+        for i in range(0, len(all_tasks), batch_size):
+            batch = all_tasks[i:i+batch_size]
+            batch_tasks = []
+            
+            # 为这一批创建实际的协程任务
+            for exchange_id, symbol in batch:
+                # 对每个任务创建新的协程，而不是复用
+                task = asyncio.create_task(self.fetch_ohlcv_with_semaphore(
+                    exchange_id=exchange_id,
+                    symbol=symbol,
+                    timeframe='1m',
+                    limit=lookback_minutes,
+                    since=since
+                ))
+                batch_tasks.append((exchange_id, symbol, task))
+            
+            # 等待当前批次的所有任务完成
+            for exchange_id, symbol, task in batch_tasks:
+                try:
+                    df = await task
+                    if not df.empty:
+                        result[exchange_id]['future'][symbol] = df
+                        success_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to fetch perpetual contract data for {symbol} on {exchange_id}: {str(e)}")
+                
+                processed += 1
+                if processed % 100 == 0:
+                    logger.info(f"Processed {processed}/{len(all_tasks)} perpetual contract tasks ({success_count} successful)")
+            
+            # 每批处理完后，让系统有短暂休息
+            if i + batch_size < len(all_tasks):
+                await asyncio.sleep(0.1)  # 100ms休息，防止系统过载
+        
+        elapsed = time.time() - start_time
+        logger.info(f"Successfully fetched perpetual contract data for {success_count}/{len(all_tasks)} symbols in {elapsed:.2f} seconds")
+        
+        # 记录每个交易所获取的数据量
+        for exchange_id in result:
+            future_count = len(result[exchange_id].get('future', {}))
+            logger.info(f"Fetched data for {future_count} perpetual contracts from {exchange_id}")
+            
+        return result 

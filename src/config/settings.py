@@ -45,6 +45,11 @@ MARKET_TYPES = os.getenv('MARKET_TYPES', 'spot,future').split(',')
 SPOT_FUTURES_DIFF_THRESHOLD = float(os.getenv('SPOT_FUTURES_DIFF_THRESHOLD', 0.1))
 SPOT_FUTURES_BASIS_DIRECTION = os.getenv('SPOT_FUTURES_BASIS_DIRECTION', 'both')  # 'both', 'premium', 'discount'
 
+# 跨所永续合约价差监控参数
+PERP_EXCHANGES = os.getenv('PERP_EXCHANGES', 'binance,gate').split(',')
+PERP_DIFF_THRESHOLD = float(os.getenv('PERP_DIFF_THRESHOLD', 0.2))
+PERP_BLACKLIST = os.getenv('PERP_BLACKLIST', 'LINA,BIFI,SUN').split(',')  # 永续合约黑名单，如即将下架的币种
+
 # Async Scanner Parameters (Advanced)
 MAX_CONCURRENT_REQUESTS = int(os.getenv('MAX_CONCURRENT_REQUESTS', 20))
 REQUEST_TIMEOUT_SECONDS = int(os.getenv('REQUEST_TIMEOUT_SECONDS', 30))
@@ -59,6 +64,10 @@ LARK_SECRET = os.getenv('LARK_SECRET', '')
 # Lark (Feishu) Configuration - 专用于现货-期货价差通知
 SPOT_FUTURES_LARK_WEBHOOK_URL = os.getenv('SPOT_FUTURES_LARK_WEBHOOK_URL', '')
 SPOT_FUTURES_LARK_SECRET = os.getenv('SPOT_FUTURES_LARK_SECRET', '')
+
+# Lark (Feishu) Configuration - 专用于跨所永续合约价差通知
+PERP_EXCHANGE_LARK_WEBHOOK_URL = os.getenv('PERP_EXCHANGE_LARK_WEBHOOK_URL', '')
+PERP_EXCHANGE_LARK_SECRET = os.getenv('PERP_EXCHANGE_LARK_SECRET', '')
 
 # Historical Data Cache
 CACHE_DIR = os.getenv('CACHE_DIR', os.path.join(ROOT_DIR, '.cache'))

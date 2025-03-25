@@ -16,6 +16,13 @@ A cryptocurrency market scanner that detects abnormal price movements and volume
 - 模块化设计，便于扩展
 - 增强的错误处理和重试机制
 - 智能速率限制和资源管理
+- 监控多个交易所（Binance、OKX、Bybit、Gate等）的价格和成交量数据
+- 实时检测异常价格波动和成交量突增
+- 监控交易所内的现货-期货基差变化
+- **跨交易所永续合约价差监控与套利机会检测**
+- 通过Lark（飞书）发送实时通知
+- 支持自定义价格变动阈值和监控参数
+- **基于WebSocket的高效数据订阅机制**
 
 ## 安装步骤
 
@@ -78,6 +85,18 @@ python run_event_driven.py
 使用WebSocket连接专门监控现货和期货交易对之间的价差：
 ```
 python run_subscription_spot_futures.py
+```
+
+### 5. 跨交易所永续合约价差监控模式（REST API版）
+
+```bash
+python run_perp_exchange_monitor.py
+```
+
+### 6. 跨交易所永续合约价差监控模式（WebSocket版，推荐）
+
+```bash
+python run_perp_exchange_ws_monitor.py
 ```
 
 ## 三种模式对比
@@ -222,10 +241,7 @@ SPOT_FUTURES_DIFF_THRESHOLD=0.1
 ```
 # 现货-期货价差监控参数
 SPOT_FUTURES_DIFF_THRESHOLD=0.1     # 现货与期货价格差异阈值(百分比)
-
-# 现货-期货价差专用通知通道
-SPOT_FUTURES_LARK_WEBHOOK_URL="your_spot_futures_webhook_url"
-SPOT_FUTURES_LARK_SECRET="your_spot_futures_secret"
+SPOT_FUTURES_BASIS_DIRECTION=both  # 'both', 'premium', 'discount'
 ```
 
 如果未配置专用通知通道，系统将使用默认的Lark通知设置。
@@ -343,3 +359,46 @@ CryptoRador事件驱动版本使用WebSocket连接实时获取数据，程序退
 1. 使用Ctrl+C而不是终端的强制关闭按钮来停止程序
 2. 确保程序有足够的时间(1-2秒)来清理资源
 3. 如果问题持续存在，可以升级到最新版本，或者检查日志中的错误信息
+
+### 跨交易所永续合约价差监控
+
+跨交易所永续合约价差监控模式可以检测不同交易所之间相同币种的USDT永续合约价格差异:
+
+1. 系统会自动发现各交易所中共有的永续合约交易对
+2. 计算不同交易所之间的价格差异百分比
+3. 当价格差异超过配置的阈值（默认0.2%）时，触发报警
+4. 报警消息会发送到配置的飞书通知通道
+
+价差通知可以配置独立的飞书通知通道:
+
+```
+# 跨所永续合约价差监控参数
+PERP_EXCHANGES=binance,gate
+PERP_DIFF_THRESHOLD=0.2
+PERP_BLACKLIST=LINA,BIFI,SUN  # 永续合约黑名单，逗号分隔
+```
+
+提供两种运行模式:
+
+- REST API模式: 周期性查询API获取价格数据 (`run_perp_exchange_monitor.py`)
+- WebSocket模式: 通过WebSocket实时订阅价格变化，更加高效和及时 (`run_perp_exchange_ws_monitor.py`)
+
+你可以使用`PERP_BLACKLIST`设置不需要监控的币种，比如已知即将下架的币种或者波动过大不适合套利的币种。
+
+建议使用WebSocket模式来监控价差，能够更及时地捕捉套利机会。
+
+### Lark（飞书）配置
+
+```
+# Lark (飞书) 配置 - 异常价格和成交量通知
+LARK_WEBHOOK_URL="your_lark_webhook_url"
+LARK_SECRET="your_lark_secret"
+
+# Lark (飞书) 配置 - 专用于现货-期货价差通知
+SPOT_FUTURES_LARK_WEBHOOK_URL="your_spot_futures_lark_webhook_url"
+SPOT_FUTURES_LARK_SECRET="your_spot_futures_lark_secret"
+
+# Lark (飞书) 配置 - 专用于跨所永续合约价差通知
+PERP_EXCHANGE_LARK_WEBHOOK_URL="your_perp_exchange_lark_webhook_url"
+PERP_EXCHANGE_LARK_SECRET="your_perp_exchange_lark_secret"
+```

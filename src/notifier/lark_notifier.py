@@ -75,6 +75,9 @@ class LarkNotifier:
         # 检查是否为现货-期货价差报警
         if movement.get('alert_type') == 'spot_futures_basis':
             return self._get_spot_futures_card_content(movement)
+        # 检查是否为跨所永续合约价差报警
+        elif movement.get('alert_type') == 'perp_exchange_difference':
+            return self._get_perp_exchange_card_content(movement)
             
         logger.debug(f"Formatting card message for one abnormal movement: {movement}")
         
@@ -311,6 +314,147 @@ class LarkNotifier:
         
         return {"msg_type": "interactive", "card": card}
     
+    def _get_perp_exchange_card_content(self, alert: dict) -> dict:
+        """生成跨所永续合约价差报警的卡片内容
+        
+        Args:
+            alert: 价差报警字典
+            
+        Returns:
+            卡片内容字典
+        """
+        logger.debug(f"Formatting card message for cross-exchange perpetual price difference alert: {alert}")
+        
+        base_symbol = alert.get('base_symbol', 'Unknown')
+        exchange1 = alert.get('exchange1', 'Unknown')
+        exchange2 = alert.get('exchange2', 'Unknown')
+        symbol1 = alert.get('symbol1', 'Unknown')
+        symbol2 = alert.get('symbol2', 'Unknown')
+        price1 = alert.get('price1', 0.0)
+        price2 = alert.get('price2', 0.0)
+        volume1 = alert.get('volume1', 0.0)
+        volume2 = alert.get('volume2', 0.0)
+        price_diff = alert.get('price_difference_percent', 0.0)
+        higher_exchange = alert.get('higher_exchange', 'Unknown')
+        lower_exchange = alert.get('lower_exchange', 'Unknown')
+        timestamp = alert.get('timestamp', '')
+        notes = alert.get('notes', '')
+        
+        # 格式化交易量，使用适当的单位 (万、亿)
+        formatted_volume1 = self._format_large_number(volume1)
+        formatted_volume2 = self._format_large_number(volume2)
+        
+        # 使用紫色区分跨所永续合约价差报警
+        color = "purple"
+        title = f"{base_symbol} | 跨所永续合约价差 {abs(price_diff):.4f}%"
+        
+        elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**基础交易对**: {base_symbol}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**交易所1**: {exchange1} ({symbol1})"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**交易所2**: {exchange2} ({symbol2})"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**价格1**: {price1} | **24h交易量**: {formatted_volume1}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**价格2**: {price2} | **24h交易量**: {formatted_volume2}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**价格差异**: {price_diff:.4f}%"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**套利方向**: {higher_exchange} ➔ {lower_exchange}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**时间**: {timestamp}"
+                }
+            }
+        ]
+        
+        # 添加notes字段（如果存在）
+        if notes:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**备注**: {notes}"
+                }
+            })
+            
+        # 添加必需的关键词(使用斜体和小字体，不显眼但确保存在)
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"_crypto exchange arbitrage alert_"
+            }
+        })
+        
+        card = {
+            "elements": elements,
+            "header": {
+                "template": color,
+                "title": {
+                    "content": title,
+                    "tag": "plain_text"
+                }
+            }
+        }
+        
+        return {"msg_type": "interactive", "card": card}
+    
+    def _format_large_number(self, number: float) -> str:
+        """将大数字格式化为带有适当单位的字符串
+        
+        Args:
+            number: 要格式化的数字
+            
+        Returns:
+            格式化后的字符串（如：1.5亿, 2000万, 3.5千）
+        """
+        if number >= 100_000_000:  # 1亿及以上
+            return f"{number/100_000_000:.2f}亿"
+        elif number >= 10_000:  # 1万及以上
+            return f"{number/10_000:.2f}万"
+        else:
+            return f"{number:.2f}"
+    
     def _create_percentile_bar(self, percentile: float) -> str:
         """创建一个可视化的百分位数条
         
@@ -346,79 +490,35 @@ class LarkNotifier:
         if not abnormal_movements:
             return None
             
-        # 如果只有一个异常波动，直接使用单个卡片
+        # 将通知分组处理
         if len(abnormal_movements) == 1:
+            # 只有一个通知，直接返回卡片内容
             return self._get_card_content(abnormal_movements[0])
+        else:
+            # 多个通知，按类型分组处理
+            spot_futures_alerts = []
+            perp_exchange_alerts = []
+            other_movements = []
             
-        # 检查报警类型是否一致
-        all_types = set(movement.get('alert_type', 'price_movement') for movement in abnormal_movements)
-        
-        # 如果全部是现货-期货价差报警，使用汇总卡片
-        if len(all_types) == 1 and 'spot_futures_basis' in all_types:
-            return self._format_spot_futures_summary_card(abnormal_movements)
-            
-        # 多个异常波动时，创建一个汇总卡片
-        elements = []
-        for i, movement in enumerate(abnormal_movements, 1):
-            exchange = movement.get('exchange', 'Unknown')
-            symbol = movement.get('symbol', 'Unknown')
-            price_change = movement.get('price_change_percent', 0.0)
-            volume_ratio = movement.get('volume_ratio', 0.0)
-            current_price = movement.get('current_price', 0.0)
-            
-            # 价格分位数信息
-            price_percentile = movement.get('price_percentile', None)
-            price_30d_high = movement.get('30d_high', None)
-            price_30d_low = movement.get('30d_low', None)
-            
-            # 基本信息
-            content = f"**{i}. {exchange} | {symbol}**\n"
-            content += f"价格: {current_price} (变动: {price_change:.2f}%)\n"
-            content += f"成交量比: {volume_ratio:.2f}x\n"
-            
-            # 添加价格分位数信息（如果存在）
-            if price_percentile is not None:
-                content += f"30天价格分位: {price_percentile:.2f}%\n"
-                
-                # 如果有30天高低价信息
-                if price_30d_high is not None and price_30d_low is not None:
-                    content += f"30天区间: {price_30d_low:.2f} - {price_30d_high:.2f}"
-            
-            elements.append({
-                "tag": "div",
-                "text": {
-                    "tag": "lark_md",
-                    "content": content
-                }
-            })
-            
-            # 添加分隔线，除了最后一个
-            if i < len(abnormal_movements):
-                elements.append({
-                    "tag": "hr"
-                })
-                
-        # 添加必需的关键词(使用斜体和小字体，不显眼但确保存在)
-        elements.append({
-            "tag": "div",
-            "text": {
-                "tag": "lark_md",
-                "content": f"_crypto market alert_"
-            }
-        })
-                
-        card = {
-            "elements": elements,
-            "header": {
-                "template": "red",
-                "title": {
-                    "content": f"检测到 {len(abnormal_movements)} 个异常行情",
-                    "tag": "plain_text"
-                }
-            }
-        }
-        
-        return {"msg_type": "interactive", "card": card}
+            for movement in abnormal_movements:
+                if movement.get('alert_type') == 'spot_futures_basis':
+                    spot_futures_alerts.append(movement)
+                elif movement.get('alert_type') == 'perp_exchange_difference':
+                    perp_exchange_alerts.append(movement)
+                else:
+                    other_movements.append(movement)
+                    
+            # 根据不同类型的警报数量决定显示方式
+            if len(spot_futures_alerts) > 0 and not other_movements and not perp_exchange_alerts:
+                # 只有现货-期货价差警报
+                return self._format_spot_futures_summary_card(spot_futures_alerts)
+            elif len(perp_exchange_alerts) > 0 and not other_movements and not spot_futures_alerts:
+                # 只有跨所永续合约价差警报
+                return self._format_perp_exchange_summary_card(perp_exchange_alerts)
+            else:
+                # 混合警报或者只有常规价格波动警报，使用默认格式
+                # 这里只显示第一个警报，避免消息过长
+                return self._get_card_content(abnormal_movements[0])
     
     def _format_spot_futures_summary_card(self, alerts: List[Dict[str, Any]]) -> Dict:
         """生成多个现货-期货价差报警的汇总卡片
@@ -470,6 +570,78 @@ class LarkNotifier:
                 "template": "orange",
                 "title": {
                     "content": f"现货-期货基差异常报警汇总",
+                    "tag": "plain_text"
+                }
+            }
+        }
+        
+        return {"msg_type": "interactive", "card": card}
+    
+    def _format_perp_exchange_summary_card(self, alerts: List[Dict[str, Any]]) -> Dict:
+        """为跨所永续合约价差报警格式化汇总卡片内容
+        
+        Args:
+            alerts: 一组价差警报
+            
+        Returns:
+            汇总卡片内容
+        """
+        # 使用紫色
+        color = "purple"
+        title = f"🔄 跨所永续合约价差警报 ({len(alerts)}个)"
+        
+        # 按价差绝对值从大到小排序
+        sorted_alerts = sorted(alerts, 
+                               key=lambda x: abs(x.get('price_difference_percent', 0.0)), 
+                               reverse=True)
+        
+        # 创建表格内容
+        table_content = "| 基础币种 | 交易所 | 价格差异 | 交易量 | 套利方向 |\n| ---- | ---- | ---- | ---- | ---- |\n"
+        
+        for alert in sorted_alerts[:10]:  # 限制最多显示10条
+            base_symbol = alert.get('base_symbol', 'Unknown')
+            exchange1 = alert.get('exchange1', 'Unknown')
+            exchange2 = alert.get('exchange2', 'Unknown')
+            price_diff = alert.get('price_difference_percent', 0.0)
+            volume1 = alert.get('volume1', 0.0)
+            volume2 = alert.get('volume2', 0.0)
+            higher_exchange = alert.get('higher_exchange', 'Unknown')
+            lower_exchange = alert.get('lower_exchange', 'Unknown')
+            
+            # 格式化交易量
+            formatted_volume1 = self._format_large_number(volume1)
+            formatted_volume2 = self._format_large_number(volume2)
+            volume_display = f"{formatted_volume1}/{formatted_volume2}"
+            
+            table_content += f"| {base_symbol} | {exchange1}/{exchange2} | {price_diff:.4f}% | {volume_display} | {higher_exchange} ➔ {lower_exchange} |\n"
+            
+        # 如果有更多警报，显示提示
+        if len(alerts) > 10:
+            table_content += f"\n_还有 {len(alerts) - 10} 个警报未显示..._"
+        
+        elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": table_content
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"_crypto exchange arbitrage alerts_"
+                }
+            }
+        ]
+        
+        card = {
+            "elements": elements,
+            "header": {
+                "template": color,
+                "title": {
+                    "content": title,
                     "tag": "plain_text"
                 }
             }
