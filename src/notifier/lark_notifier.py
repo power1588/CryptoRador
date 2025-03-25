@@ -72,6 +72,10 @@ class LarkNotifier:
         Returns:
             Card content dictionary
         """
+        # 检查是否为现货-期货价差报警
+        if movement.get('alert_type') == 'spot_futures_basis':
+            return self._get_spot_futures_card_content(movement)
+            
         logger.debug(f"Formatting card message for one abnormal movement: {movement}")
         
         exchange = movement.get('exchange', 'Unknown')
@@ -198,6 +202,115 @@ class LarkNotifier:
         
         return {"msg_type": "interactive", "card": card}
     
+    def _get_spot_futures_card_content(self, alert: dict) -> dict:
+        """生成现货-期货价差报警的卡片内容
+        
+        Args:
+            alert: 价差报警字典
+            
+        Returns:
+            卡片内容字典
+        """
+        logger.debug(f"Formatting card message for spot-futures basis alert: {alert}")
+        
+        exchange = alert.get('exchange', 'Unknown')
+        spot_symbol = alert.get('spot_symbol', 'Unknown')
+        future_symbol = alert.get('future_symbol', 'Unknown')
+        spot_price = alert.get('spot_price', 0.0)
+        future_price = alert.get('future_price', 0.0)
+        price_diff = alert.get('price_difference_percent', 0.0)
+        timestamp = alert.get('timestamp', '')
+        notes = alert.get('notes', '')
+        
+        # 基差超过0表示期货溢价，低于0表示期货贴水
+        is_premium = price_diff > 0
+        color = "orange"  # 使用橙色区分现货-期货价差报警
+        title = f"{exchange} | 现货-期货异常基差 {abs(price_diff):.4f}%"
+        
+        elements = [
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**交易所**: {exchange}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**现货交易对**: {spot_symbol}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**期货交易对**: {future_symbol}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**现货价格**: {spot_price}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**期货价格**: {future_price}"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**基差**: {price_diff:.4f}% ({'期货溢价' if is_premium else '期货贴水'})"
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**时间**: {timestamp}"
+                }
+            }
+        ]
+        
+        # 添加notes字段（如果存在）
+        if notes:
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"**备注**: {notes}"
+                }
+            })
+            
+        # 添加必需的关键词(使用斜体和小字体，不显眼但确保存在)
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"_spot futures basis alert_"
+            }
+        })
+        
+        card = {
+            "elements": elements,
+            "header": {
+                "template": color,
+                "title": {
+                    "content": title,
+                    "tag": "plain_text"
+                }
+            }
+        }
+        
+        return {"msg_type": "interactive", "card": card}
+    
     def _create_percentile_bar(self, percentile: float) -> str:
         """创建一个可视化的百分位数条
         
@@ -236,6 +349,13 @@ class LarkNotifier:
         # 如果只有一个异常波动，直接使用单个卡片
         if len(abnormal_movements) == 1:
             return self._get_card_content(abnormal_movements[0])
+            
+        # 检查报警类型是否一致
+        all_types = set(movement.get('alert_type', 'price_movement') for movement in abnormal_movements)
+        
+        # 如果全部是现货-期货价差报警，使用汇总卡片
+        if len(all_types) == 1 and 'spot_futures_basis' in all_types:
+            return self._format_spot_futures_summary_card(abnormal_movements)
             
         # 多个异常波动时，创建一个汇总卡片
         elements = []
@@ -293,6 +413,63 @@ class LarkNotifier:
                 "template": "red",
                 "title": {
                     "content": f"检测到 {len(abnormal_movements)} 个异常行情",
+                    "tag": "plain_text"
+                }
+            }
+        }
+        
+        return {"msg_type": "interactive", "card": card}
+    
+    def _format_spot_futures_summary_card(self, alerts: List[Dict[str, Any]]) -> Dict:
+        """生成多个现货-期货价差报警的汇总卡片
+        
+        Args:
+            alerts: 价差报警列表
+            
+        Returns:
+            汇总卡片字典
+        """
+        elements = []
+        
+        # 添加标题
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"**检测到 {len(alerts)} 个交易对出现现货-期货价差异常**"
+            }
+        })
+        
+        # 添加每个报警的简要信息
+        for i, alert in enumerate(alerts, 1):
+            exchange = alert.get('exchange', 'Unknown')
+            spot_symbol = alert.get('spot_symbol', 'Unknown')
+            future_symbol = alert.get('future_symbol', 'Unknown')
+            price_diff = alert.get('price_difference_percent', 0.0)
+            
+            elements.append({
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"{i}. **{exchange}** | 现货: {spot_symbol} | 期货: {future_symbol} | 基差: {price_diff:.4f}%"
+                }
+            })
+        
+        # 添加必需的关键词
+        elements.append({
+            "tag": "div",
+            "text": {
+                "tag": "lark_md",
+                "content": f"_spot futures basis alerts_"
+            }
+        })
+        
+        card = {
+            "elements": elements,
+            "header": {
+                "template": "orange",
+                "title": {
+                    "content": f"现货-期货基差异常报警汇总",
                     "tag": "plain_text"
                 }
             }

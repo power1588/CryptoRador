@@ -13,6 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.config import settings
 from src.fetcher.async_data_fetcher import AsyncMarketDataFetcher
 from src.analyzer.market_analyzer import MarketAnalyzer
+from src.analyzer.spot_futures_monitor import SpotFuturesMonitor
 from src.notifier.lark_notifier import LarkNotifier
 
 # 配置日志
@@ -34,7 +35,19 @@ class AsyncCryptoRador:
         """初始化应用组件"""
         self.data_fetcher = AsyncMarketDataFetcher()
         self.market_analyzer = MarketAnalyzer()
-        self.notifier = LarkNotifier()
+        self.spot_futures_monitor = SpotFuturesMonitor(threshold=settings.SPOT_FUTURES_DIFF_THRESHOLD)
+        
+        # 创建两个不同的通知器，分别用于价格异常和现货-期货价差异常
+        self.price_notifier = LarkNotifier(
+            webhook_url=settings.LARK_WEBHOOK_URL,
+            secret=settings.LARK_SECRET
+        )
+        
+        self.spot_futures_notifier = LarkNotifier(
+            webhook_url=settings.SPOT_FUTURES_LARK_WEBHOOK_URL,
+            secret=settings.SPOT_FUTURES_LARK_SECRET
+        )
+        
         self.running = False
         self.max_concurrent_requests = 20  # 最大并发请求数
         self.consecutive_errors = 0  # 连续错误计数
@@ -72,19 +85,43 @@ class AsyncCryptoRador:
             # 分析过程本身不需要异步，因为它是CPU密集型而非IO密集型操作
             abnormal_movements = self.market_analyzer.detect_abnormal_movements(market_data)
             
+            # 检测现货和期货之间的异常价差
+            spot_futures_alerts = self.spot_futures_monitor.detect_abnormal_basis(market_data)
+            
             analysis_time = time.time()
             logger.info(f"Data analysis completed in {analysis_time - fetch_time:.2f} seconds")
             
-            # 发送通知(如果发现了异常行情)
+            # 发送价格异常通知(如果发现了异常行情)
             if abnormal_movements:
                 logger.info(f"Found {len(abnormal_movements)} abnormal movements, sending notification")
-                notification_success = self.notifier.send_notification(abnormal_movements)
+                notification_success = self.price_notifier.send_notification(abnormal_movements)
                 if notification_success:
-                    logger.info("Notification sent successfully")
+                    logger.info("Price abnormal notification sent successfully")
                 else:
-                    logger.error("Failed to send notification")
+                    logger.error("Failed to send price abnormal notification")
             else:
                 logger.info("No abnormal movements detected")
+                
+            # 发送现货期货价差异常通知 - 使用专用的通知器
+            if spot_futures_alerts:
+                logger.info(f"Found {len(spot_futures_alerts)} abnormal spot-futures basis, sending notification")
+                
+                # 检查是否配置了专用的现货-期货通知URL
+                if settings.SPOT_FUTURES_LARK_WEBHOOK_URL:
+                    notification_success = self.spot_futures_notifier.send_notification(spot_futures_alerts)
+                    if notification_success:
+                        logger.info("Spot-futures basis notification sent to dedicated channel successfully")
+                    else:
+                        logger.error("Failed to send spot-futures basis notification to dedicated channel")
+                else:
+                    logger.warning("SPOT_FUTURES_LARK_WEBHOOK_URL not configured, using default notification channel")
+                    notification_success = self.price_notifier.send_notification(spot_futures_alerts)
+                    if notification_success:
+                        logger.info("Spot-futures basis notification sent to default channel successfully")
+                    else:
+                        logger.error("Failed to send spot-futures basis notification to default channel")
+            else:
+                logger.info("No abnormal spot-futures basis detected")
                 
             end_time = time.time()
             logger.info(f"Market scan completed in {end_time - start_time:.2f} seconds")

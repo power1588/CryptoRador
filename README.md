@@ -7,7 +7,9 @@ A cryptocurrency market scanner that detects abnormal price movements and volume
 - 每30秒扫描所有交易所的现货/合约交易对
 - 检测异常价格上涨（5分钟内上涨超过2%）
 - 识别成交量异常放大（超过5分钟滚动平均值的5倍）
-- 发送警报到飞书(Lark)群聊
+- 监控现货和期货交易对之间的价差（超过设定阈值自动报警）
+- 支持实时WebSocket订阅模式，更高效地监控现货-期货价差
+- 发送警报到飞书(Lark)群聊，现货-期货价差监控支持独立通知通道
 - 支持多家交易所：Binance、OKX、Bybit、Gate.io
 - 支持公共数据模式 - 无需API密钥即可进行基本扫描
 - 提供三种运行模式：同步、异步和事件驱动，满足不同需求
@@ -36,11 +38,19 @@ A cryptocurrency market scanner that detects abnormal price movements and volume
 4. 设置机器人名称(如"CryptoRador警报")
 5. 获取webhook URL
 6. 如需安全验证，可以启用签名并获取Secret
-7. 将获取的URL和Secret添加到.env文件：
-   ```
-   LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook令牌
-   LARK_SECRET=你的签名密钥(如果启用了签名)
-   ```
+7. 将获取的URL和Secret添加到.env文件
+
+对于异常价格和成交量通知:
+```
+LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook令牌
+LARK_SECRET=你的签名密钥(如果启用了签名)
+```
+
+对于现货-期货价差通知(可设置独立通道):
+```
+SPOT_FUTURES_LARK_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/你的webhook令牌
+SPOT_FUTURES_LARK_SECRET=你的签名密钥(如果启用了签名)
+```
 
 ## 运行方式
 
@@ -64,17 +74,23 @@ python run_async.py
 python run_event_driven.py
 ```
 
+### 基于订阅的现货-期货价差监控（专用实时监控）
+使用WebSocket连接专门监控现货和期货交易对之间的价差：
+```
+python run_subscription_spot_futures.py
+```
+
 ## 三种模式对比
 
-| 特性 | 同步版本 | 异步版本 | 事件驱动版本 |
-|------|----------|----------|--------------|
-| 数据获取方式 | 轮询 | 并发轮询 | WebSocket推送 |
-| 实时性 | 低 | 中 | 高 |
-| 资源占用 | 高 | 中 | 低 |
-| 响应速度 | 慢 | 较快 | 即时 |
-| 适用场景 | 简单监控 | 大量交易对扫描 | 实时监控和预警 |
-| 延迟 | 30秒+ | 5-10秒 | 毫秒级 |
-| 交易所负载 | 高 | 中高 | 低 |
+| 特性 | 同步版本 | 异步版本 | 事件驱动版本 | 订阅式价差监控 |
+|------|----------|----------|--------------|--------------|
+| 数据获取方式 | 轮询 | 并发轮询 | WebSocket推送 | WebSocket推送 |
+| 实时性 | 低 | 中 | 高 | 极高 |
+| 资源占用 | 高 | 中 | 低 | 低 |
+| 响应速度 | 慢 | 较快 | 即时 | 即时 |
+| 适用场景 | 简单监控 | 大量交易对扫描 | 实时监控和预警 | 现货-期货价差监控 |
+| 延迟 | 30秒+ | 5-10秒 | 毫秒级 | 毫秒级 |
+| 交易所负载 | 高 | 中高 | 低 | 低 |
 
 ## 事件驱动版本特点
 
@@ -188,6 +204,75 @@ LOOKBACK_MINUTES=5
 VOLUME_SPIKE_THRESHOLD=5.0
 # 市场类型(现货和/或合约)
 MARKET_TYPES=spot,future
+# 现货-期货价差阈值(百分比)
+SPOT_FUTURES_DIFF_THRESHOLD=0.1
+```
+
+### 现货-期货价差监控
+
+现货-期货价差监控功能可以检测交易所上同时存在的现货和期货交易对之间的价格差异:
+
+1. 系统会将相同基础资产的现货和期货交易对进行匹配（如BTC/USDT与BTC/USDT-PERP）
+2. 计算两者之间的价格差异百分比
+3. 当价格差异超过配置的阈值（默认0.1%）时，触发报警
+4. 报警消息会发送到配置的飞书通知通道
+
+价差通知可以配置独立的飞书通知通道，与异常价格和成交量监控分开:
+
+```
+# 现货-期货价差监控参数
+SPOT_FUTURES_DIFF_THRESHOLD=0.1     # 现货与期货价格差异阈值(百分比)
+
+# 现货-期货价差专用通知通道
+SPOT_FUTURES_LARK_WEBHOOK_URL="your_spot_futures_webhook_url"
+SPOT_FUTURES_LARK_SECRET="your_spot_futures_secret"
+```
+
+如果未配置专用通知通道，系统将使用默认的Lark通知设置。
+
+您可以使用以下命令单独测试现货-期货价差监控功能:
+```
+python test_spot_futures_monitor.py  # 轮询模式测试
+python run_subscription_spot_futures.py  # 订阅模式（推荐）
+```
+
+### 基于订阅的现货-期货价差监控
+
+订阅式监控使用WebSocket订阅交易所实时K线数据，比轮询式监控具有以下优势：
+
+1. **更低延迟**: 实时接收价格更新，无需等待轮询
+2. **更高效**: 减少不必要的API请求，只处理变化的数据
+3. **更实时**: 毫秒级响应，及时捕捉瞬时价差
+4. **更节省资源**: 减少带宽和CPU使用
+
+运行订阅模式:
+```
+python run_subscription_spot_futures.py
+```
+
+订阅模式支持的命令行参数:
+```
+-e, --exchanges      要监控的交易所，逗号分隔
+-t, --threshold      价差阈值(百分比)
+-d, --direction      基差方向监控(both=双向, premium=升水, discount=贴水)
+-i, --interval       检查价差的间隔(秒)，默认为5秒
+-c, --cooldown       报警冷却时间(秒)，默认为300秒
+--log-level          日志级别
+```
+
+例如，监控Binance和OKX交易所，价差阈值设为0.2%:
+```
+python run_subscription_spot_futures.py -e binance,okx -t 0.2
+```
+
+仅监控价格升水(premium)情况:
+```
+python run_subscription_spot_futures.py -d premium
+```
+
+仅监控价格贴水(discount)情况:
+```
+python run_subscription_spot_futures.py -d discount
 ```
 
 ### 异步扫描器高级参数
