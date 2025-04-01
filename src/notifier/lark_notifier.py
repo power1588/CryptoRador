@@ -131,14 +131,14 @@ class LarkNotifier:
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**价格变动**: {price_change:.2f}%"
+                    "content": f"**价格变动**: {price_change:+.2f}%"
                 }
             },
             {
                 "tag": "div",
                 "text": {
                     "tag": "lark_md",
-                    "content": f"**成交量比**: {volume_ratio:.2f}"
+                    "content": f"**成交量比**: {volume_ratio:.2f}x"
                 }
             }
         ]

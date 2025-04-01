@@ -6,6 +6,7 @@ A cryptocurrency market scanner that detects abnormal price movements and volume
 
 - 每30秒扫描所有交易所的现货/合约交易对
 - 检测异常价格上涨（5分钟内上涨超过2%）
+- 检测异常价格下跌（5分钟内下跌超过2%）
 - 识别成交量异常放大（超过5分钟滚动平均值的5倍）
 - 监控现货和期货交易对之间的价差（超过设定阈值自动报警）
 - 支持实时WebSocket订阅模式，更高效地监控现货-期货价差
@@ -138,15 +139,16 @@ python run_event_driven.py --help
   -l, --lookback LOOKBACK       历史K线数量
 
 分析参数:
-  -p, --price-threshold PRICE   价格上涨阈值(百分比)
+  -p, --price-increase-threshold PRICE   价格上涨阈值(百分比)
+  -d, --price-decrease-threshold PRICE   价格下跌阈值(百分比)
   -v, --volume-threshold VOL    成交量放大阈值(倍数)
   --log-level {DEBUG,INFO,...}  日志级别
 ```
 
-例如，监控Binance和OKX的现货市场，价格阈值设为3%：
+例如，监控Binance和OKX的现货市场，价格上涨阈值设为3%，下跌阈值设为2%：
 
 ```
-python run_event_driven.py -e binance,okx -m spot -p 3.0
+python run_event_driven.py -e binance,okx -m spot -p 3.0 -d 2.0
 ```
 
 ### 异步版本的命令行参数
@@ -217,6 +219,8 @@ EXCHANGES=binance,okx,bybit,gate
 SCAN_INTERVAL_SECONDS=30
 # 价格上涨阈值(百分比)
 MIN_PRICE_INCREASE_PERCENT=2.0
+# 价格下跌阈值(百分比)
+MIN_PRICE_DECREASE_PERCENT=2.0
 # 回溯分钟数
 LOOKBACK_MINUTES=5
 # 成交量放大倍数阈值
