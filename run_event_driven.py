@@ -32,8 +32,10 @@ def parse_arguments():
                         help=f'历史K线数量，默认: {settings.LOOKBACK_MINUTES}')
     
     # 添加阈值参数
-    parser.add_argument('-p', '--price-threshold', type=float,
+    parser.add_argument('-p', '--price-increase-threshold', type=float,
                         help=f'价格上涨阈值(百分比)，默认: {settings.MIN_PRICE_INCREASE_PERCENT}%')
+    parser.add_argument('-d', '--price-decrease-threshold', type=float,
+                        help=f'价格下跌阈值(百分比)，默认: {settings.MIN_PRICE_DECREASE_PERCENT}%')
     parser.add_argument('-v', '--volume-threshold', type=float,
                         help=f'成交量放大阈值(倍数)，默认: {settings.VOLUME_SPIKE_THRESHOLD}x')
     
@@ -55,8 +57,11 @@ def update_settings_from_args(args):
     if args.lookback:
         settings.LOOKBACK_MINUTES = args.lookback
     
-    if args.price_threshold:
-        settings.MIN_PRICE_INCREASE_PERCENT = args.price_threshold
+    if args.price_increase_threshold:
+        settings.MIN_PRICE_INCREASE_PERCENT = args.price_increase_threshold
+    
+    if args.price_decrease_threshold:
+        settings.MIN_PRICE_DECREASE_PERCENT = args.price_decrease_threshold
     
     if args.volume_threshold:
         settings.VOLUME_SPIKE_THRESHOLD = args.volume_threshold

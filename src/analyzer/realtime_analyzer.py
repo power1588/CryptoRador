@@ -19,17 +19,20 @@ class RealtimeMarketAnalyzer:
     """实时市场分析器，用于分析WebSocket推送的K线数据"""
     
     def __init__(self, price_increase_threshold: float = None, 
+                 price_decrease_threshold: float = None,
                  volume_spike_threshold: float = None, 
                  lookback_periods: int = None):
         """初始化分析器
         
         Args:
             price_increase_threshold: 价格上涨百分比阈值
+            price_decrease_threshold: 价格下跌百分比阈值
             volume_spike_threshold: 成交量放大倍数阈值
             lookback_periods: 回溯K线数量
         """
         # 使用配置或默认值
         self.price_increase_threshold = price_increase_threshold or settings.MIN_PRICE_INCREASE_PERCENT
+        self.price_decrease_threshold = price_decrease_threshold or settings.MIN_PRICE_DECREASE_PERCENT
         self.volume_spike_threshold = volume_spike_threshold or settings.VOLUME_SPIKE_THRESHOLD
         self.lookback_periods = lookback_periods or settings.LOOKBACK_MINUTES
         
@@ -44,7 +47,8 @@ class RealtimeMarketAnalyzer:
         self.historical_data_cache = {}
         self.cache_expiry = {}  # 缓存过期时间 
         
-        logger.info(f"Initialized RealtimeMarketAnalyzer with: price_threshold={self.price_increase_threshold}%, "
+        logger.info(f"Initialized RealtimeMarketAnalyzer with: price_increase_threshold={self.price_increase_threshold}%, "
+                   f"price_decrease_threshold={self.price_decrease_threshold}%, "
                    f"volume_threshold={self.volume_spike_threshold}x, lookback={self.lookback_periods} periods")
     
     async def get_historical_daily_data(self, exchange_id: str, symbol: str, days: int = 30) -> pd.DataFrame:
@@ -244,11 +248,12 @@ class RealtimeMarketAnalyzer:
             volume_change_ratio = latest_volume / avg_volume if avg_volume > 0 else 1.0
             
             # 检查是否有异常
-            is_abnormal_price = price_change_percent >= self.price_increase_threshold
+            is_abnormal_price_up = price_change_percent >= self.price_increase_threshold
+            is_abnormal_price_down = price_change_percent <= -self.price_decrease_threshold
             is_abnormal_volume = volume_change_ratio >= self.volume_spike_threshold
             
             # 同时满足价格和成交量异常条件
-            if is_abnormal_price and is_abnormal_volume:
+            if (is_abnormal_volume and (is_abnormal_price_up or is_abnormal_price_down)):
                 # 检查是否是期货合约
                 is_future = self.is_future_contract(symbol)
                 
@@ -265,7 +270,8 @@ class RealtimeMarketAnalyzer:
                     'volume_change_ratio': volume_change_ratio,
                     'detected_at': datetime.now(),
                     'is_future': is_future,  # 添加期货标识
-                    'volume_ratio': volume_change_ratio  # 添加兼容性字段
+                    'volume_ratio': volume_change_ratio,  # 添加兼容性字段
+                    'movement_type': 'up' if is_abnormal_price_up else 'down'  # 添加移动类型
                 }
                 
                 # 异步计算30天价格分位数
@@ -288,9 +294,10 @@ class RealtimeMarketAnalyzer:
                 # 设置冷却时间
                 self.alert_cooldowns[cooldown_key] = datetime.now()
                 
-                logger.info(f"Detected anomaly in {symbol} on {exchange_id}: "
-                          f"Price +{price_change_percent:.2f}% (at {price_percentile:.2f}% percentile), "
-                          f"Volume {volume_change_ratio:.2f}x")
+                movement_type = "上涨" if is_abnormal_price_up else "下跌"
+                logger.info(f"检测到异常{movement_type}在 {symbol} 于 {exchange_id}: "
+                          f"价格{price_change_percent:+.2f}% (位于{price_percentile:.2f}%分位数), "
+                          f"成交量{volume_change_ratio:.2f}倍")
                 
                 return anomaly
         
