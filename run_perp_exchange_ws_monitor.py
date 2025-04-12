@@ -86,7 +86,7 @@ async def main():
                 scan_count += 1
                 
                 # 获取市场数据 (从WebSocket订阅缓存中获取)
-                market_data = market_subscriber.get_market_data()
+                market_data = await market_subscriber.get_market_data()
                 
                 # 输出订阅统计信息
                 active_subscriptions = 0

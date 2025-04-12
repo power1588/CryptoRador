@@ -83,3 +83,9 @@ MAX_CACHE_AGE_HOURS = int(os.getenv('MAX_CACHE_AGE_HOURS', 24))
 # Logging
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FILE = os.getenv('LOG_FILE', os.path.join(ROOT_DIR, 'crypto_radar.log'))
+
+# 交易所交易量阈值配置（24小时成交量，单位：USDT）
+EXCHANGE_VOLUME_THRESHOLDS = {
+    'binance': 20_000_000,  # Binance 24小时交易量阈值：2000万
+    'gate': 5_000_000,      # Gate 24小时交易量阈值：500万
+}

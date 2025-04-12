@@ -649,53 +649,106 @@ class LarkNotifier:
         
         return {"msg_type": "interactive", "card": card}
     
-    def send_notification(self, abnormal_movements: List[Dict[str, Any]]) -> bool:
-        """Send notification of abnormal movements to Lark.
+    def send_notification(self, alerts: List[Dict[str, Any]]) -> None:
+        """发送通知到Lark
         
         Args:
-            abnormal_movements: List of detected abnormal market movements
-            
-        Returns:
-            True if message was sent successfully, False otherwise
+            alerts: 警报信息列表
         """
-        if not abnormal_movements:
-            logger.warning("No abnormal movements to send notification for")
-            return False
+        if not alerts:
+            return
             
-        if not self.webhook_url:
-            logger.error("Lark webhook URL is not configured")
-            return False
-            
-        # 格式化消息
-        message = self.format_card_message(abnormal_movements)
-        if not message:
-            logger.error("Failed to format card message")
-            return False
-            
-        # 添加时间戳和签名
-        timestamp = int(time.time())
-        message["timestamp"] = timestamp
-        message["sign"] = self._generate_sign(timestamp)
-        
         try:
-            # 发送请求
-            response = requests.post(self.webhook_url, json=message)
-            response_text = response.text
+            # 构建通知消息
+            message = "🚨 跨所永续合约价差监控警报\n\n"
             
-            if response.status_code == 200:
-                response_json = response.json()
-                if response_json.get('code') == 0:
-                    logger.info(f"Successfully sent Lark notification for {len(abnormal_movements)} movements")
-                    return True
+            # 将警报按价差绝对值从大到小排序
+            sorted_alerts = sorted(alerts, key=lambda x: abs(x.get('price_diff', 0)), reverse=True)
+            
+            for alert in sorted_alerts:
+                # 检查是否是跨所永续合约价差警报
+                if 'price_diff' in alert:
+                    # 获取24小时成交量
+                    volume1 = alert.get('volume1', 0)
+                    volume2 = alert.get('volume2', 0)
+                    
+                    # 格式化成交量（转换为万或亿为单位）
+                    def format_volume(volume):
+                        if volume >= 100_000_000:  # 1亿以上
+                            return f"{volume/100_000_000:.2f}亿"
+                        elif volume >= 10_000:  # 1万以上
+                            return f"{volume/10_000:.2f}万"
+                        else:
+                            return f"{volume:.2f}"
+                    
+                    # 跨所永续合约价差格式
+                    message += (
+                        f"💰 交易对: {alert['symbol']}\n"
+                        f"📊 价差: {alert['price_diff']:.4f}%\n"
+                        f"📈 {alert['exchange1']}: {alert['price1']:.8f} (24h成交量: {format_volume(volume1)})\n"
+                        f"📉 {alert['exchange2']}: {alert['price2']:.8f} (24h成交量: {format_volume(volume2)})\n"
+                        f"⏰ 时间: {alert['timestamp']}\n"
+                        f"{'='*30}\n"
+                    )
                 else:
-                    logger.error(f"Failed to send Lark notification: {response_json}")
-                    return False
-            else:
-                logger.error(f"Failed to send Lark notification, status code: {response.status_code}, response: {response_text}")
-                return False
+                    # 原有的价格变动警报格式
+                    message += (
+                        f"🔔 {alert.get('exchange', 'Unknown')} | {alert.get('symbol', 'Unknown')}\n"
+                        f"📊 价格变动: {alert.get('price_change', 0):.2f}%\n"
+                        f"⏰ 时间: {alert.get('timestamp', '')}\n"
+                        f"💰 当前价格: {alert.get('current_price', 0):.8f}\n"
+                        f"📈 成交量比: {alert.get('volume_ratio', 0):.2f}x\n"
+                        f"{'='*30}\n"
+                    )
+            
+            # 发送到Lark
+            self._send_to_lark(message)
+            
         except Exception as e:
-            logger.exception(f"Error sending Lark notification: {str(e)}")
-            return False
+            logger.error(f"发送Lark通知时出错: {str(e)}")
+            
+    def _send_to_lark(self, message: str) -> None:
+        """发送消息到Lark
+        
+        Args:
+            message: 要发送的消息
+        """
+        try:
+            # 构建请求数据
+            data = {
+                "msg_type": "text",
+                "content": {
+                    "text": message
+                }
+            }
+            
+            # 添加签名
+            if self.secret:
+                timestamp = str(int(time.time()))
+                string_to_sign = f"{timestamp}\n{self.secret}"
+                signature = hmac.new(
+                    self.secret.encode('utf-8'),
+                    string_to_sign.encode('utf-8'),
+                    digestmod=hashlib.sha256
+                ).hexdigest()
+                
+                data["timestamp"] = timestamp
+                data["sign"] = signature
+            
+            # 发送请求
+            response = requests.post(
+                self.webhook_url,
+                json=data,
+                headers={'Content-Type': 'application/json'},
+                timeout=5
+            )
+            
+            # 检查响应
+            if response.status_code != 200:
+                logger.error(f"发送Lark通知失败: {response.status_code} - {response.text}")
+                
+        except Exception as e:
+            logger.error(f"发送Lark通知时出错: {str(e)}")
 
     def test_notification(self) -> bool:
         """Send a test notification to verify Lark webhook configuration works.

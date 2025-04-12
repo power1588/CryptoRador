@@ -117,129 +117,116 @@ class PerpExchangeMonitor:
         
         logger.info(f"找到 {len(self.symbol_mapping)} 个在所有交易所中都存在的USDT永续合约")
     
-    def calculate_price_differences(self, 
-                                    market_data: Dict[str, Dict[str, pd.DataFrame]]) -> List[Dict[str, Any]]:
-        """计算不同交易所之间的价格差异
+    def calculate_price_differences(self, market_data: Dict[str, Dict[str, Dict[str, pd.DataFrame]]]) -> List[Dict]:
+        """计算不同交易所之间的永续合约价差
         
         Args:
-            market_data: 交易所 -> 市场类型 -> 符号 -> DataFrame的市场数据嵌套字典
+            market_data: 市场数据，格式为 {exchange_id: {market_type: {symbol: DataFrame}}}
             
         Returns:
-            包含价格差异信息的字典列表
+            价差超过阈值的合约列表
         """
-        # 首先建立交易对映射
-        self._build_symbol_mapping(market_data)
+        alerts = []
         
-        if not self.symbol_mapping:
-            logger.warning("没有找到可比较的交易对")
-            return []
-            
-        price_diff_alerts = []
+        # 从配置文件获取交易量阈值
+        volume_thresholds = settings.EXCHANGE_VOLUME_THRESHOLDS
         
-        # 对每个基础交易对进行比较
-        for base, exchange_symbols in self.symbol_mapping.items():
-            # 确保至少有两个交易所的数据才能比较
-            exchanges = list(exchange_symbols.keys())
-            if len(exchanges) < 2:
-                continue
+        # 收集所有合约的成交量数据用于统计
+        exchange_volumes = {exchange: [] for exchange in self.exchanges}
+        
+        # 遍历所有交易所
+        for i, exchange1 in enumerate(self.exchanges):
+            for exchange2 in self.exchanges[i+1:]:
+                # 获取两个交易所的永续合约数据
+                future1 = market_data.get(exchange1, {}).get('future', {})
+                future2 = market_data.get(exchange2, {}).get('future', {})
                 
-            # 收集每个交易所的最新价格和交易量
-            latest_prices = {}
-            volumes_24h = {}
-            
-            for exchange in exchanges:
-                symbol = exchange_symbols[exchange]
+                # 找到两个交易所共有的合约
+                common_symbols = set(future1.keys()) & set(future2.keys())
                 
-                # 检查数据是否存在
-                if (exchange in market_data and 
-                    'future' in market_data[exchange] and 
-                    symbol in market_data[exchange]['future']):
-                    
-                    df = market_data[exchange]['future'][symbol]
-                    if not df.empty:
-                        latest_prices[exchange] = df.iloc[-1]['close']
+                if not common_symbols:
+                    logger.debug(f"交易所 {exchange1} 和 {exchange2} 之间没有共同的永续合约")
+                    continue
+                
+                logger.debug(f"交易所 {exchange1} 和 {exchange2} 之间有 {len(common_symbols)} 个共同的永续合约")
+                
+                # 计算每个共同合约的价差
+                for symbol in common_symbols:
+                    try:
+                        # 获取最新的价格数据
+                        df1 = future1[symbol]
+                        df2 = future2[symbol]
                         
-                        # 计算24小时交易量 (如果有足够数据)
-                        if 'volume' in df.columns:
-                            # 如果数据是按分钟存储，则需要60*24个数据点来计算24小时交易量
-                            # 由于可能没有足够的数据点，我们使用可用的所有数据点来估算
-                            available_volume = df['volume'].sum()
-                            # 记录估算的24小时交易量
-                            volumes_24h[exchange] = available_volume
-            
-            # 如果至少有两个交易所的价格可以比较
-            if len(latest_prices) >= 2:
-                # 对每对交易所进行价格差异计算
-                for i, exchange1 in enumerate(latest_prices.keys()):
-                    for exchange2 in list(latest_prices.keys())[i+1:]:
-                        price1 = latest_prices[exchange1]
-                        price2 = latest_prices[exchange2]
-                        
-                        if price1 <= 0 or price2 <= 0:
+                        if df1.empty or df2.empty:
+                            logger.debug(f"合约 {symbol} 在 {exchange1} 或 {exchange2} 上没有数据")
                             continue
                             
-                        # 获取交易量
-                        volume1 = volumes_24h.get(exchange1, 0)
-                        volume2 = volumes_24h.get(exchange2, 0)
+                        # 获取最新价格和24小时交易量
+                        price1 = df1['close'].iloc[-1]
+                        price2 = df2['close'].iloc[-1]
                         
-                        # 交易量约束检查
-                        # Binance上要求24小时交易量超过2000万
-                        # Gate上要求24小时交易量超过100万
-                        volume_threshold_passed = True
+                        # 从ticker数据中获取24小时交易量
+                        volume1 = df1['base_volume'].iloc[-1] if 'base_volume' in df1.columns else 0
+                        volume2 = df2['base_volume'].iloc[-1] if 'base_volume' in df2.columns else 0
                         
-                        if exchange1 == 'binance' and volume1 < 20_000_000:
-                            volume_threshold_passed = False
-                            logger.debug(f"{base} 在 Binance 的交易量不足: {volume1}, 需要: 20,000,000")
+                        # 收集成交量数据用于统计
+                        if volume1 > 0:
+                            exchange_volumes[exchange1].append(volume1)
+                        if volume2 > 0:
+                            exchange_volumes[exchange2].append(volume2)
                         
-                        if exchange2 == 'binance' and volume2 < 20_000_000:
-                            volume_threshold_passed = False
-                            logger.debug(f"{base} 在 Binance 的交易量不足: {volume2}, 需要: 20,000,000")
-                            
-                        if exchange1 == 'gate' and volume1 < 1_000_000:
-                            volume_threshold_passed = False
-                            logger.debug(f"{base} 在 Gate 的交易量不足: {volume1}, 需要: 1,000,000")
-                            
-                        if exchange2 == 'gate' and volume2 < 1_000_000:
-                            volume_threshold_passed = False
-                            logger.debug(f"{base} 在 Gate 的交易量不足: {volume2}, 需要: 1,000,000")
-                        
-                        if not volume_threshold_passed:
+                        # 检查交易量是否满足阈值要求
+                        if exchange1 in volume_thresholds and volume1 < volume_thresholds[exchange1]:
+                            logger.debug(f"{symbol} 在 {exchange1} 的24小时交易量 {volume1:.2f} 低于阈值 {volume_thresholds[exchange1]:.2f}")
                             continue
                             
-                        # 计算价格差异百分比 (price2 - price1) / price1 * 100
-                        price_diff_percent = ((price2 - price1) / price1) * 100
+                        if exchange2 in volume_thresholds and volume2 < volume_thresholds[exchange2]:
+                            logger.debug(f"{symbol} 在 {exchange2} 的24小时交易量 {volume2:.2f} 低于阈值 {volume_thresholds[exchange2]:.2f}")
+                            continue
                         
-                        # 如果差异超过阈值，生成警报
-                        if abs(price_diff_percent) >= self.threshold:
-                            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            
-                            # 确定哪个交易所价格更高
-                            higher_exchange = exchange2 if price2 > price1 else exchange1
-                            lower_exchange = exchange1 if price2 > price1 else exchange2
-                            higher_price = max(price1, price2)
-                            lower_price = min(price1, price2)
-                            
-                            alert_info = {
-                                'base_symbol': base,
+                        # 计算价差百分比
+                        price_diff = abs(price1 - price2) / min(price1, price2) * 100
+                        
+                        # 输出调试信息
+                        logger.debug(
+                            f"价差分析 - {symbol}:\n"
+                            f"  {exchange1}: {price1:.8f} (24h成交量: {volume1:.2f})\n"
+                            f"  {exchange2}: {price2:.8f} (24h成交量: {volume2:.2f})\n"
+                            f"  价差: {price_diff:.4f}%\n"
+                            f"  阈值: {self.threshold}%"
+                        )
+                        
+                        # 如果价差超过阈值，添加到警报列表
+                        if price_diff > self.threshold:
+                            alert = {
+                                'symbol': symbol,
                                 'exchange1': exchange1,
-                                'exchange2': exchange2,
-                                'symbol1': exchange_symbols[exchange1],
-                                'symbol2': exchange_symbols[exchange2],
                                 'price1': price1,
-                                'price2': price2,
                                 'volume1': volume1,
+                                'exchange2': exchange2,
+                                'price2': price2,
                                 'volume2': volume2,
-                                'price_difference_percent': round(price_diff_percent, 4),
-                                'higher_exchange': higher_exchange,
-                                'lower_exchange': lower_exchange,
-                                'higher_price': higher_price,
-                                'lower_price': lower_price,
-                                'timestamp': timestamp,
-                                'alert_type': 'perp_exchange_difference',
-                                'notes': f"{exchange1}与{exchange2}的{base}永续合约价差{abs(price_diff_percent):.4f}%，超过阈值{self.threshold}%"
+                                'price_diff': price_diff,
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            alerts.append(alert)
+                            logger.info(
+                                f"发现价差机会 - {symbol}:\n"
+                                f"  {exchange1}: {price1:.8f} (24h成交量: {volume1:.2f})\n"
+                                f"  {exchange2}: {price2:.8f} (24h成交量: {volume2:.2f})\n"
+                                f"  价差: {price_diff:.4f}%"
+                            )
                             
-                            price_diff_alerts.append(alert_info)
-                            logger.info(f"检测到跨所永续合约价差: {exchange1}/{exchange2} | {base} | {price_diff_percent:.4f}%")
+                    except Exception as e:
+                        logger.error(f"计算 {symbol} 价差时出错: {str(e)}")
         
-        return price_diff_alerts 
+        # 计算并输出每个交易所的成交量中位数
+        for exchange, volumes in exchange_volumes.items():
+            if volumes:
+                median_volume = np.median(volumes)
+                logger.info(f"交易所 {exchange} 的24小时成交量中位数: {median_volume:.2f} USDT")
+                logger.info(f"交易所 {exchange} 共有 {len(volumes)} 个合约有成交量数据")
+            else:
+                logger.warning(f"交易所 {exchange} 没有有效的成交量数据")
+        
+        return alerts 

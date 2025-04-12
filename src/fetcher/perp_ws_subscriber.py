@@ -7,6 +7,7 @@ import ccxt.pro as ccxtpro
 import pandas as pd
 from datetime import datetime, timedelta
 import re
+import time
 
 # 修复导入路径问题
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -28,6 +29,8 @@ class PerpWebSocketSubscriber:
         self.running = False
         self.stop_event = asyncio.Event()
         self.blacklist = set(base.strip().upper() for base in settings.PERP_BLACKLIST)  # 黑名单集合
+        self.data_lock = asyncio.Lock()  # 添加数据锁
+        self.market_data = {}  # 添加市场数据存储 {exchange_id: {'future': {symbol: DataFrame}}}
         
         # 记录黑名单
         if self.blacklist:
@@ -73,20 +76,50 @@ class PerpWebSocketSubscriber:
                 self.exchanges[exchange_id] = exchange_class(config)
                 
                 # 加载市场数据
-                await asyncio.wait_for(
-                    self.exchanges[exchange_id].load_markets(),
-                    timeout=settings.REQUEST_TIMEOUT_SECONDS
-                )
-                logger.info(f"成功加载{exchange_id}的市场数据")
+                try:
+                    await asyncio.wait_for(
+                        self.exchanges[exchange_id].load_markets(),
+                        timeout=settings.REQUEST_TIMEOUT_SECONDS
+                    )
+                    logger.info(f"成功加载{exchange_id}的市场数据")
+                    
+                    # 验证市场数据
+                    if not self.exchanges[exchange_id].markets:
+                        logger.error(f"{exchange_id} 市场数据为空")
+                        continue
+                        
+                    # 输出市场统计信息
+                    market_count = len(self.exchanges[exchange_id].markets)
+                    logger.info(f"{exchange_id} 共有 {market_count} 个市场")
+                    
+                    # 检查是否有永续合约
+                    perp_count = 0
+                    for symbol, market in self.exchanges[exchange_id].markets.items():
+                        if 'USDT' in symbol and (
+                            market.get('future', False) or 
+                            market.get('swap', False) or
+                            'PERP' in symbol or 
+                            ':USDT' in symbol
+                        ):
+                            perp_count += 1
+                    
+                    logger.info(f"{exchange_id} 共有 {perp_count} 个USDT永续合约")
+                    
+                except asyncio.TimeoutError:
+                    logger.error(f"加载{exchange_id}市场数据超时")
+                    if exchange_id in self.exchanges:
+                        del self.exchanges[exchange_id]
+                    continue
+                except Exception as e:
+                    logger.error(f"加载{exchange_id}市场数据时出错: {str(e)}")
+                    if exchange_id in self.exchanges:
+                        del self.exchanges[exchange_id]
+                    continue
                 
                 # 初始化该交易所的数据存储
                 self.ohlcv_data[exchange_id] = {}
                 self.active_subscriptions[exchange_id] = set()
                 
-            except asyncio.TimeoutError:
-                logger.error(f"加载{exchange_id}市场数据超时")
-                if exchange_id in self.exchanges:
-                    del self.exchanges[exchange_id]
             except Exception as e:
                 logger.error(f"初始化交易所{exchange_id}时出错: {str(e)}")
                 if exchange_id in self.exchanges:
@@ -357,104 +390,98 @@ class PerpWebSocketSubscriber:
             logger.error(f"订阅 {exchange_id}:{symbol} 时出错: {str(e)}")
             return False
     
-    async def _watch_ohlcv(self, exchange_id: str, symbol: str, timeframe: str = '1m'):
-        """监听OHLCV数据的内部方法
+    async def _watch_ohlcv(self, exchange_id: str, symbol: str, timeframe: str = '1m') -> None:
+        """监控特定交易所和交易对的OHLCV数据
         
         Args:
             exchange_id: 交易所ID
             symbol: 交易对符号
-            timeframe: 时间周期
+            timeframe: 时间周期，默认为1分钟
         """
-        if exchange_id not in self.exchanges:
+        exchange = self.exchanges.get(exchange_id)
+        if not exchange:
+            logger.error(f"交易所 {exchange_id} 未初始化")
             return
             
-        exchange = self.exchanges[exchange_id]
-        retries = 0
-        max_retries = settings.MAX_RETRIES
+        retry_count = 0
+        max_retries = 3
         
-        while not self.stop_event.is_set() and retries <= max_retries:
+        while not self.stop_event.is_set() and retry_count < max_retries:
             try:
-                # 使用ccxt.pro的watchOHLCV方法订阅数据
-                while not self.stop_event.is_set():
-                    ohlcv = await exchange.watchOHLCV(symbol, timeframe)
+                # 获取OHLCV数据
+                ohlcv = await exchange.watchOHLCV(symbol, timeframe)
+                if not ohlcv or len(ohlcv) == 0:
+                    logger.warning(f"未收到 {exchange_id} {symbol} 的OHLCV数据")
+                    await asyncio.sleep(1)
+                    continue
                     
-                    if not ohlcv or len(ohlcv) == 0:
-                        continue
-                        
-                    # 转换数据并保存
-                    latest_candle = ohlcv[-1]
+                # 获取ticker数据
+                ticker = await exchange.watchTicker(symbol)
+                if not ticker:
+                    logger.warning(f"未收到 {exchange_id} {symbol} 的ticker数据")
+                    await asyncio.sleep(1)
+                    continue
                     
-                    # 确保数据格式正确
-                    if len(latest_candle) >= 6:
-                        timestamp = pd.to_datetime(latest_candle[0], unit='ms')
-                        open_price = float(latest_candle[1])
-                        high_price = float(latest_candle[2])
-                        low_price = float(latest_candle[3])
-                        close_price = float(latest_candle[4])
-                        volume = float(latest_candle[5])
+                # 安全地获取ticker数据中的值
+                def safe_get_float(data, key, default=0.0):
+                    try:
+                        value = data.get(key)
+                        if value is None:
+                            return default
+                        return float(value)
+                    except (ValueError, TypeError):
+                        return default
+                
+                # 创建新的数据行
+                new_row = pd.DataFrame({
+                    'timestamp': [pd.to_datetime(ohlcv[-1][0], unit='ms')],
+                    'open': [float(ohlcv[-1][1])],
+                    'high': [float(ohlcv[-1][2])],
+                    'low': [float(ohlcv[-1][3])],
+                    'close': [float(ohlcv[-1][4])],
+                    'volume': [float(ohlcv[-1][5])],
+                    'quote_volume': [safe_get_float(ticker, 'quoteVolume')],
+                    'base_volume': [safe_get_float(ticker, 'baseVolume')],
+                    'last_price': [safe_get_float(ticker, 'last', float(ohlcv[-1][4]))],
+                    'bid': [safe_get_float(ticker, 'bid')],
+                    'ask': [safe_get_float(ticker, 'ask')],
+                    'vwap': [safe_get_float(ticker, 'vwap')],
+                    'percentage': [safe_get_float(ticker, 'percentage')],
+                    'average': [safe_get_float(ticker, 'average')]
+                })
+                
+                # 更新数据存储
+                async with self.data_lock:
+                    if exchange_id not in self.market_data:
+                        self.market_data[exchange_id] = {'future': {}}
+                    if symbol not in self.market_data[exchange_id]['future']:
+                        self.market_data[exchange_id]['future'][symbol] = pd.DataFrame()
                         
-                        # 创建新行数据
-                        new_data = {
-                            'timestamp': timestamp,
-                            'open': open_price,
-                            'high': high_price,
-                            'low': low_price,
-                            'close': close_price,
-                            'volume': volume
-                        }
-                        
-                        # 获取当前DataFrame
-                        df = self.ohlcv_data[exchange_id].get(symbol)
-                        
-                        # 确保DataFrame已初始化
-                        if df is None or not isinstance(df, pd.DataFrame):
-                            # 创建新的DataFrame
-                            self.ohlcv_data[exchange_id][symbol] = pd.DataFrame([new_data])
-                        else:
-                            # 如果已经有相同时间戳的数据，则更新它
-                            if not df.empty and df['timestamp'].iloc[-1] == timestamp:
-                                df.iloc[-1] = pd.Series(new_data)
-                            else:
-                                # 创建单行DataFrame
-                                new_row = pd.DataFrame([new_data])
-                                # 追加新数据
-                                self.ohlcv_data[exchange_id][symbol] = pd.concat([df, new_row], ignore_index=True)
-                            
-                            # 保持DataFrame不超过1000行
-                            if len(self.ohlcv_data[exchange_id][symbol]) > 1000:
-                                self.ohlcv_data[exchange_id][symbol] = self.ohlcv_data[exchange_id][symbol].iloc[-1000:]
-                        
-                        # 输出debug信息
-                        logger.debug(f"收到 {exchange_id}:{symbol} 的OHLCV更新: {timestamp} - 价格: {close_price}")
+                    df = self.market_data[exchange_id]['future'][symbol]
                     
-            except asyncio.CancelledError:
-                # 任务被取消，退出循环
-                break
+                    # 检查是否有重复的时间戳
+                    if not df.empty and df['timestamp'].iloc[-1] == new_row['timestamp'].iloc[0]:
+                        df.iloc[-1] = new_row.iloc[0]
+                    else:
+                        df = pd.concat([df, new_row], ignore_index=True)
+                        
+                    # 保持最新的1000条记录
+                    if len(df) > 1000:
+                        df = df.tail(1000)
+                        
+                    self.market_data[exchange_id]['future'][symbol] = df
+                    
+                # 重置重试计数
+                retry_count = 0
+                
             except Exception as e:
-                error_str = str(e)
-                
-                # 检查是否是Gate交易所的options.candlesticks错误
-                if exchange_id == 'gate' and 'Unknown channel options.candlesticks' in error_str:
-                    logger.warning(f"交易所 {exchange_id} 不支持此交易对 {symbol} 的OHLCV订阅，移除订阅")
-                    if symbol in self.active_subscriptions[exchange_id]:
-                        self.active_subscriptions[exchange_id].remove(symbol)
+                retry_count += 1
+                logger.error(f"监控 {exchange_id} {symbol} 时出错: {str(e)}")
+                if retry_count < max_retries:
+                    await asyncio.sleep(2 ** retry_count)  # 指数退避
+                else:
+                    logger.error(f"监控 {exchange_id} {symbol} 失败，已达到最大重试次数")
                     break
-                
-                retries += 1
-                wait_time = 2 ** retries  # 指数退避
-                logger.error(f"{exchange_id}:{symbol} 监听出错: {error_str}, 重试 ({retries}/{max_retries}) 在 {wait_time}秒后")
-                
-                # 如果超过最大重试次数，从活跃订阅中移除
-                if retries > max_retries:
-                    logger.warning(f"移除 {exchange_id}:{symbol} 订阅，因为重试次数已用尽")
-                    if symbol in self.active_subscriptions[exchange_id]:
-                        self.active_subscriptions[exchange_id].remove(symbol)
-                    break
-                
-                # 等待一段时间后重试
-                await asyncio.sleep(wait_time)
-        
-        logger.info(f"停止监听 {exchange_id}:{symbol} 的OHLCV数据")
     
     async def subscribe_common_contracts(self):
         """订阅所有交易所共有的永续合约"""
@@ -465,16 +492,31 @@ class PerpWebSocketSubscriber:
             return 0
             
         subscription_count = 0
+        failed_subscriptions = []
+        
         for base, exchange_symbols in common_contracts.items():
             for exchange_id, symbol in exchange_symbols.items():
-                success = await self.subscribe_to_ohlcv(exchange_id, symbol)
-                if success:
-                    subscription_count += 1
+                try:
+                    success = await self.subscribe_to_ohlcv(exchange_id, symbol)
+                    if success:
+                        subscription_count += 1
+                        logger.debug(f"成功订阅 {exchange_id}:{symbol}")
+                    else:
+                        failed_subscriptions.append(f"{exchange_id}:{symbol}")
+                        logger.warning(f"订阅失败 {exchange_id}:{symbol}")
+                except Exception as e:
+                    failed_subscriptions.append(f"{exchange_id}:{symbol}")
+                    logger.error(f"订阅 {exchange_id}:{symbol} 时出错: {str(e)}")
+        
+        if failed_subscriptions:
+            logger.warning(f"以下 {len(failed_subscriptions)} 个订阅失败:")
+            for failed in failed_subscriptions:
+                logger.warning(f"  - {failed}")
         
         logger.info(f"成功订阅了 {subscription_count} 个永续合约数据流")
         return subscription_count
     
-    def get_market_data(self) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
+    async def get_market_data(self) -> Dict[str, Dict[str, Dict[str, pd.DataFrame]]]:
         """获取当前市场数据
         
         Returns:
@@ -482,29 +524,102 @@ class PerpWebSocketSubscriber:
         """
         result = {}
         
-        for exchange_id, symbol_data in self.ohlcv_data.items():
-            # 确保初始化交易所数据结构
-            if exchange_id not in result:
-                result[exchange_id] = {}
-            
-            # 确保'future'键存在
-            if 'future' not in result[exchange_id]:
-                result[exchange_id]['future'] = {}
-            
-            # 复制有效的DataFrame数据
-            for symbol, df in symbol_data.items():
-                if isinstance(df, pd.DataFrame) and not df.empty:
-                    # 复制一份DataFrame避免修改原始数据
-                    result[exchange_id]['future'][symbol] = df.copy()
-        
-        # 添加调试日志
-        for exchange_id in result:
-            if 'future' in result[exchange_id]:
-                future_count = len(result[exchange_id]['future'])
-                if future_count > 0:
-                    logger.debug(f"交易所 {exchange_id} 有 {future_count} 个有效的永续合约价格数据")
-                else:
-                    logger.warning(f"交易所 {exchange_id} 没有任何有效的永续合约价格数据")
+        # 使用 data_lock 保护数据访问
+        async with self.data_lock:
+            for exchange_id, market_types in self.market_data.items():
+                # 确保初始化交易所数据结构
+                if exchange_id not in result:
+                    result[exchange_id] = {}
+                
+                # 复制每种市场类型的数据
+                for market_type, symbol_data in market_types.items():
+                    # 确保市场类型键存在
+                    if market_type not in result[exchange_id]:
+                        result[exchange_id][market_type] = {}
+                    
+                    # 复制有效的DataFrame数据
+                    valid_symbols = 0
+                    for symbol, df in symbol_data.items():
+                        try:
+                            # 检查DataFrame是否存在且不为空
+                            if df is None:
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} DataFrame为None")
+                                continue
+                                
+                            if not isinstance(df, pd.DataFrame):
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} 数据类型错误: {type(df)}")
+                                continue
+                                
+                            if df.empty:
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} DataFrame为空")
+                                continue
+                            
+                            # 验证数据完整性
+                            required_columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+                            missing_columns = [col for col in required_columns if col not in df.columns]
+                            if missing_columns:
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} 缺少必要列: {missing_columns}")
+                                continue
+                            
+                            # 确保数据类型正确
+                            df = df.copy()
+                            try:
+                                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                                for col in ['open', 'high', 'low', 'close', 'volume']:
+                                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                            except Exception as e:
+                                logger.error(f"转换 {exchange_id}:{symbol} 数据类型时出错: {str(e)}")
+                                continue
+                            
+                            # 删除包含无效值的行
+                            df = df.dropna()
+                            
+                            # 检查是否有有效数据
+                            if df.empty:
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} 数据无效（包含空值）")
+                                continue
+                            
+                            # 检查数据是否过期（超过5分钟）
+                            # 注意：交易所数据通常是UTC时间，而本地时间可能是UTC+8
+                            # 因此需要调整时间比较逻辑
+                            latest_timestamp = df['timestamp'].max()
+                            time_diff = (datetime.now() - latest_timestamp).total_seconds()
+                            
+                            # 如果时间差超过5分钟，记录警告
+                            # 但考虑到时区差异，我们允许更大的时间差
+                            if time_diff > 300:  # 5分钟
+                                # 检查是否是时区问题（时间差接近8小时）
+                                if abs(time_diff - 8 * 3600) < 300:  # 如果时间差接近8小时（±5分钟）
+                                    logger.debug(f"交易所 {exchange_id} 的 {symbol} 数据时间差 {time_diff/3600:.2f} 小时，可能是时区差异")
+                                else:
+                                    logger.warning(f"交易所 {exchange_id} 的 {symbol} 数据可能已过期，最新时间: {latest_timestamp}，时间差: {time_diff/60:.2f} 分钟")
+                            
+                            # 检查价格是否合理
+                            if (df['close'] <= 0).any():
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} 包含非正价格")
+                                # 过滤掉非正价格
+                                df = df[df['close'] > 0]
+                                if df.empty:
+                                    logger.warning(f"交易所 {exchange_id} 的 {symbol} 过滤后没有有效数据")
+                                    continue
+                            
+                            # 检查价格是否异常
+                            if (df['close'] > 1000000).any() or (df['close'] < 0.000001).any():
+                                logger.warning(f"交易所 {exchange_id} 的 {symbol} 包含异常价格")
+                                # 不跳过异常价格，但仍然记录警告
+                            
+                            result[exchange_id][market_type][symbol] = df
+                            valid_symbols += 1
+                            logger.debug(f"交易所 {exchange_id} 的 {symbol} 有 {len(df)} 条有效数据")
+                            
+                        except Exception as e:
+                            logger.error(f"处理 {exchange_id}:{symbol} 数据时出错: {str(e)}")
+                    
+                    # 添加调试日志
+                    if valid_symbols > 0:
+                        logger.info(f"交易所 {exchange_id} 的 {market_type} 市场有 {valid_symbols} 个有效的价格数据")
+                    else:
+                        logger.warning(f"交易所 {exchange_id} 的 {market_type} 市场没有任何有效的价格数据")
         
         return result
     
